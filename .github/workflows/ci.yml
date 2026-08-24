@@ -9,6 +9,20 @@ jobs:
   backend:
     name: Backend (Rust)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: deepsave
+          POSTGRES_PASSWORD: deepsave
+          POSTGRES_DB: deepsave
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U deepsave"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,6 +33,8 @@ jobs:
         run: cargo check --manifest-path backend/Cargo.toml
       - name: Test
         run: cargo test --manifest-path backend/Cargo.toml
+        env:
+          DATABASE_URL: postgres://deepsave:deepsave@localhost:5432/deepsave
 
   frontend:
     name: Frontend (React)

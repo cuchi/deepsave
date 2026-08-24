@@ -16,5 +16,25 @@ services:
       timeout: 5s
       retries: 10
 
+  app:
+    build: .
+    container_name: deepsave-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://deepsave:deepsave@postgres:5432/deepsave
+      PORT: "8080"
+      STATIC_DIR: /app/dist
+      SESSION_SECRET: deepsave-dev-secret-change-me-0123456789
+      APP_PASSWORD: deepsave
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # DEEPSEEK_BASE_URL: https://api.deepseek.com
+    ports:
+      - "8080:8080"
+    volumes:
+      - appdata:/app/storage
+
 volumes:
   pgdata:
+  appdata:

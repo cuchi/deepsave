@@ -1,32 +1,48 @@
-import { useEffect, useState } from 'react'
-
-interface Health {
-  status: string
-  db: boolean
-}
+import { Navigate, Route, Routes } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { authApi } from './api/client'
+import Login from './pages/Login'
+import MonthView from './pages/MonthView'
+import Categories from './pages/Categories'
+import Upload from './pages/Upload'
+import Review from './pages/Review'
+import Coverage from './pages/Coverage'
+import Memory from './pages/Memory'
+import Layout from './components/Layout'
 
 export default function App() {
-  const [health, setHealth] = useState<Health | null>(null)
-  const [error, setError] = useState(false)
+  const { data, isLoading } = useQuery({
+    queryKey: ['me'],
+    queryFn: authApi.me,
+    retry: false,
+  })
 
-  useEffect(() => {
-    fetch('/api/health')
-      .then((r) => r.json())
-      .then((d: Health) => setHealth(d))
-      .catch(() => setError(true))
-  }, [])
+  if (isLoading) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-zinc-950 text-zinc-400">
+        carregando…
+      </div>
+    )
+  }
+
+  const authed = data?.authenticated ?? false
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-zinc-950 text-zinc-100">
-      <h1 className="text-4xl font-bold tracking-tight">DeepSave</h1>
-      <p className="text-zinc-400">AI-augmented personal finance manager</p>
-      <code className="rounded-md bg-zinc-900 px-3 py-1 text-sm text-zinc-300">
-        {error
-          ? 'backend unreachable'
-          : health
-            ? `backend: ${health.status}, db: ${health.db}`
-            : 'checking…'}
-      </code>
-    </div>
+    <Routes>
+      <Route
+        path="/login"
+        element={authed ? <Navigate to="/" replace /> : <Login />}
+      />
+      <Route element={authed ? <Layout /> : <Navigate to="/login" replace />}>
+        <Route path="/" element={<MonthView />} />
+        <Route path="/months/:ym" element={<MonthView />} />
+        <Route path="/categories" element={<Categories />} />
+        <Route path="/upload" element={<Upload />} />
+        <Route path="/review" element={<Review />} />
+        <Route path="/coverage" element={<Coverage />} />
+        <Route path="/memory" element={<Memory />} />
+      </Route>
+      <Route path="*" element={<Navigate to={authed ? '/' : '/login'} replace />} />
+    </Routes>
   )
 }

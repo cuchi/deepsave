@@ -1,0 +1,23 @@
+# Rust
+backend/target
+**/target
+
+# Node
+frontend/node_modules
+frontend/dist
+
+# Env / secrets
+.env
+.env.local
+
+# Storage (uploaded documents)
+storage/
+
+# VCS / logs
+.git
+.gitignore
+*.log
+.DS_Store
+
+# Local dev artifacts
+/tmp
