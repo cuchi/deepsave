@@ -11,7 +11,7 @@ pub struct ParsedItem {
     pub merchant: Option<String>,
     /// Signed cents (negative = expense / outflow).
     pub amount_cents: i64,
-    /// 'expense' | 'income' | 'refund' | 'card_payment' | 'investment'
+    /// 'expense' | 'income' | 'refund' | 'card_payment' | 'investment' | 'internal'
     pub kind: String,
     /// Mapped category name (already matched to our category tree).
     pub category: Option<String>,

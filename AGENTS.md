@@ -22,6 +22,7 @@ DeepSave: single-user, self-hosted personal finance app. Upload statements/recei
 
 ```bash
 docker compose up --build          # full app at :8080
+docker compose watch               # dev: rebuilds & recreates the app container on code changes (file-watch)
 ./scripts/seed.sh                  # seed fake data
 cd backend && cargo run            # dev backend (needs postgres up)
 cd frontend && npm run dev         # dev frontend at :5173

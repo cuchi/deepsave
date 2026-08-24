@@ -11,6 +11,7 @@ const KIND_LABELS: Record<string, string> = {
   refund: 'Estorno',
   card_payment: 'Pagamento de fatura',
   investment: 'Investimento',
+  internal: 'Interna',
 }
 
 function normMerchant(s: string): string {
@@ -141,7 +142,7 @@ export default function Review() {
                     <span className="ml-auto whitespace-nowrap text-sm tabular-nums">
                       {it.kind === 'income'
                         ? '+'
-                        : it.kind === 'card_payment' || it.kind === 'investment'
+                        : it.kind === 'card_payment' || it.kind === 'investment' || it.kind === 'internal'
                           ? ''
                           : '−'}
                       {fmtCents(it.amount_cents)}

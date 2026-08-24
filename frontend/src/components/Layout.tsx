@@ -41,6 +41,9 @@ export default function Layout() {
             <Link to="/categories" className="hover:text-zinc-100">
               Categorias
             </Link>
+            <Link to="/tags" className="hover:text-zinc-100">
+              Tags
+            </Link>
           </nav>
         </div>
         <button

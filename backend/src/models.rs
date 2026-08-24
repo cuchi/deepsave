@@ -32,6 +32,15 @@ pub struct UpdateCategory {
     pub is_active: bool,
 }
 
+// ---------- Tags ----------
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct TagUsage {
+    pub tag: String,
+    /// Number of items carrying this tag.
+    pub count: i64,
+}
+
 // ---------- Items ----------
 
 fn default_kind() -> String {
@@ -89,6 +98,35 @@ pub struct ItemInput {
     pub category_id: Option<Uuid>,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+// ---------- Bulk item updates ----------
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TagsMode {
+    Replace,
+    Add,
+    Remove,
+}
+
+/// Bulk edit payload for `PATCH /items/bulk`. Omitted fields keep their value:
+/// - `kind`: omitted = keep current kind
+/// - `category_id`: `None` = keep, `Some(None)` = clear, `Some(Some(id))` = set
+/// - `tags`: omitted = keep; `tags_mode` picks replace/add/remove (default replace)
+#[derive(Debug, Deserialize)]
+pub struct BulkItemUpdate {
+    pub ids: Vec<Uuid>,
+    pub kind: Option<String>,
+    pub category_id: Option<Option<Uuid>>,
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub tags_mode: Option<TagsMode>,
+    /// Opt-in: feed the categorization memory (per distinct merchant) when the
+    /// category is being changed. Off by default — bulk edits are often
+    /// structural/seasonal rather than per-merchant corrections.
+    #[serde(default)]
+    pub update_memory: bool,
 }
 
 // ---------- Documents ----------

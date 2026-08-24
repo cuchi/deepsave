@@ -282,7 +282,7 @@ Esquema JSON exato:
       "amount_cents": integer,
       "category": string | null,
       "tags": [string],
-      "kind": "expense" | "income" | "refund" | "card_payment" | "investment",
+      "kind": "expense" | "income" | "refund" | "card_payment" | "investment" | "internal",
       "installment": integer | null,
       "installment_count": integer | null,
       "date": "YYYY-MM-DD" | null
@@ -295,6 +295,7 @@ Regras:
 - "kind" padrão é "expense". Use "income" para receitas (inclui Pix/TED recebidos), "refund" para estornos.
 - Use "card_payment" para pagamentos da fatura do cartão de crédito (ex: "Pagamento Fatura"). Eles NÃO são despesas — a despesa real já está nas transações do cartão.
 - Use "investment" para investimentos (ex: emissão/resgate de CDB, impostos de fundos). Eles são rastreados mas NÃO entram nos cálculos de gasto/receita.
+- Use "internal" para transferências entre contas do próprio usuário (ex: transferência da conta Nubank para a conta C6, Pix entre contas dele). Elas NÃO contam como despesa/receita.
 - Ignore cabeçalhos, saldos e linhas de total. Extraia apenas itens individuais de gasto/receita.
 - Para parcelas (ex: 7/10), preencha installment=7 e installment_count=10.
 - "date" de cada item é a data da transação; se o documento tiver uma data única, pode repeti-la.

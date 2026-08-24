@@ -5,14 +5,14 @@
 ## Categories & tags — remaining (#4 structure & tooling)
 
 - Use the `categories.parent_id` tree in the UI (sub-categories; pie rolls up to parent).
-- Tag management page: usage counts, rename (cascades), merge, delete.
 - Category merge/rename tools + usage counts.
 - Optional tag colors / color presets + emoji icon for categories.
 
 > Done already: tag normalization, seeded categories, CSV bank-category mapping (#1),
 > tag autocomplete + tags on rows + tag filter (#2), smarter matching + AI "new category"
-> suggestion + one-click memory apply (#3). Note: memory auto-applies only *category*
-> (tags are situational); recurring rules carry category and are the last milestone (M7 ✓).
+> suggestion + one-click memory apply (#3), **tag management page** — usage counts, rename
+> (cascades to items/recurring/memory), merge, delete (M9 ✓). Note: memory auto-applies only
+> *category* (tags are situational); recurring rules carry category and are the last milestone (M7 ✓).
 
 ## Loose ends (deferred, non-blocking)
 

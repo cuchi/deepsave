@@ -19,6 +19,25 @@ services:
   app:
     build: .
     container_name: deepsave-app
+    # Dev file-watch: run `docker compose watch` (or `docker compose up --watch`).
+    # Any change under the watched paths rebuilds the image (BuildKit reuses the
+    # cached dependency layers) and recreates the container with the new code.
+    develop:
+      watch:
+        - action: rebuild
+          path: .
+          ignore:
+            # Non-code files that shouldn't trigger a rebuild.
+            # (backend/target, frontend/node_modules, frontend/dist, storage/,
+            #  examples/, .env, .git ... are already excluded via .dockerignore.)
+            - README.md
+            - AGENTS.md
+            - PLAN.md
+            - PLAN-DONE.md
+            - docker-compose.yml
+            - scripts/
+            - .github/
+            - .env.example
     depends_on:
       postgres:
         condition: service_healthy

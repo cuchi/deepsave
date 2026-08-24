@@ -60,11 +60,20 @@ Rules are **analytics-only** — they never create items. Dashboard "Recorrentes
 Moved parsers under `services/parsers/` (shared `ParsedItem`). Added **C6 bank statement CSV**
 and **Caixa credit-card fatura PDF** parsers; `investment` + `card_payment` kinds; images→receipt.
 
+### M10 — Tag management
+`/tags` page: usage counts per tag, rename (cascades to `items`, `recurring_rules` and
+`merchant_memory`; renaming into an existing tag merges), merge, delete.
+Backend: `GET /api/tags/usage`, `PATCH /api/tags/rename`, `POST /api/tags/merge`,
+`DELETE /api/tags/{tag}` (all tags normalized: lowercase + strip accents).
+
 ## Established decisions (as implemented)
 
 - PostgreSQL (SQLite rejected); signed-cookie auth; single `APP_PASSWORD` / `APP_PASSWORD_HASH`.
 - Amounts in cents: **negative = expense, positive = income**.
 - `card_payment` kind for credit-card bill payments — **excluded from spend** (no double-count).
+- `internal` kind for transfers between the user's own accounts — **excluded from spend/income**
+  (set manually via bulk edit/item form or by the AI; parsers can't reliably detect self-transfers
+  without the user's identity).
 - C6 installments are dated by the **fatura billing month** (parsed from `Fatura_YYYY-MM-dd.csv`); "Única" items keep "Data de Compra".
 - Images always classify as **`receipt`** (never card/bank statement).
 - Linking is **document-level** and re-runnable (`POST /api/matches/suggest`).

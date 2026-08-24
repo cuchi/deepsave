@@ -128,3 +128,8 @@ export interface UpcomingOccurrence {
   next_due_on: string
   days_until: number
 }
+
+export interface TagUsage {
+  tag: string
+  count: number
+}

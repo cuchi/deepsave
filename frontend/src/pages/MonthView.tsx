@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   CartesianGrid,
   Cell,
@@ -23,10 +23,12 @@ import {
   recurringApi,
   sourcesApi,
   tagsApi,
+  type BulkItemUpdateInput,
 } from '../api/client'
 import type { Item } from '../lib/types'
 import { currentMonth, fmtCents } from '../lib/format'
 import ItemForm from '../components/ItemForm'
+import BulkEditModal from '../components/BulkEditModal'
 import BankLogo from '../components/BankLogo'
 
 interface FormState {
@@ -40,6 +42,7 @@ const KIND_LABELS: Record<string, string> = {
   refund: 'Estorno',
   card_payment: 'Fatura',
   investment: 'Investimento',
+  internal: 'Interna',
 }
 
 const PIE_COLORS = [
@@ -100,6 +103,8 @@ export default function MonthView() {
   const month = ym ?? currentMonth()
 
   const [form, setForm] = useState<FormState>({ open: false })
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkOpen, setBulkOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [categoryId, setCategoryId] = useState('')
   const [tagFilter, setTagFilter] = useState('')
@@ -119,7 +124,7 @@ export default function MonthView() {
   const { data: docs = [] } = useQuery({ queryKey: ['documents'], queryFn: documentsApi.list })
   const { data: coverage } = useQuery({ queryKey: ['coverage'], queryFn: coverageApi.get })
 
-  const { data: items = [], isLoading } = useQuery({
+  const { data: items = [], isLoading, isPlaceholderData } = useQuery({
     queryKey: ['items', month, search, categoryId, tagFilter, bankFilter, kindFilter, sortBy],
     queryFn: () =>
       itemsApi.list({
@@ -131,6 +136,9 @@ export default function MonthView() {
         kind: kindFilter || undefined,
         sort: sortBy || undefined,
       }),
+    // Keep the previous list rendered while a filter change refetches, so the
+    // page doesn't collapse to a loading line and the scroll position holds.
+    placeholderData: keepPreviousData,
   })
 
   const { data: dash } = useQuery({
@@ -148,8 +156,34 @@ export default function MonthView() {
 
   const del = useMutation({
     mutationFn: (id: string) => itemsApi.remove(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['items', month] }),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: ['items', month] })
+      // Drop a deleted item from the selection so the count stays accurate.
+      setSelected((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+    },
   })
+
+  const bulk = useMutation({
+    mutationFn: (input: BulkItemUpdateInput) => itemsApi.bulkUpdate(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['dashboard'] })
+      qc.invalidateQueries({ queryKey: ['tags'] })
+      qc.invalidateQueries({ queryKey: ['memory'] })
+      setBulkOpen(false)
+      setSelected(new Set())
+    },
+  })
+
+  // Selection is scoped to what's currently visible: changing the month or any
+  // filter resets it (avoids accidentally bulk-editing hidden items).
+  useEffect(() => {
+    setSelected(new Set())
+  }, [month, search, categoryId, tagFilter, bankFilter, kindFilter])
 
   const catById = new Map(categories.map((c) => [c.id, c]))
   const bankBySource = new Map(sources.map((s) => [s.id, s.bank]))
@@ -171,6 +205,8 @@ export default function MonthView() {
     }
   }
   const roots = items.filter((i) => i.parent_id === null)
+  const rootIds = roots.map((r) => r.id)
+  const allSelected = roots.length > 0 && roots.every((r) => selected.has(r.id))
 
   const missingSources = (coverage?.sources ?? []).filter((s) => s.enabled && !s.present.includes(month))
 
@@ -191,6 +227,21 @@ export default function MonthView() {
       className="flex items-center gap-2 border-t border-zinc-800/60 py-1 first:border-t-0"
     >
       <span className="min-w-0 flex-1 truncate text-xs text-zinc-300">{c.description}</span>
+      {c.tags.length > 0 && (
+        <span className="flex shrink-0 items-center gap-1">
+          {c.tags.slice(0, 3).map((t) => (
+            <span
+              key={t}
+              className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+            >
+              {t}
+            </span>
+          ))}
+          {c.tags.length > 3 && (
+            <span className="text-[10px] text-zinc-600">+{c.tags.length - 3}</span>
+          )}
+        </span>
+      )}
       <span className={`shrink-0 text-xs tabular-nums ${amountColor(c.amount_cents)}`}>
         {signOf(c.amount_cents)}
         {fmtCents(c.amount_cents)}
@@ -213,6 +264,22 @@ export default function MonthView() {
     return (
       <div key={it.id}>
         <div className="group relative flex items-center gap-2 py-1.5">
+          <input
+            type="checkbox"
+            checked={selected.has(it.id)}
+            onChange={(e) => {
+              const next = new Set(selected)
+              if (e.target.checked) {
+                next.add(it.id)
+              } else {
+                next.delete(it.id)
+              }
+              setSelected(next)
+            }}
+            onClick={(e) => e.stopPropagation()}
+            title="Selecionar para edição em massa"
+            className="checkbox shrink-0"
+          />
           <button
             onClick={() => setDetailsFor(detailsOpen ? null : it.id)}
             className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200"
@@ -329,7 +396,19 @@ export default function MonthView() {
             )}
             <p className="mb-1 whitespace-pre-wrap text-zinc-300">{it.description}</p>
             {it.merchant && <p>Comerciante: {it.merchant}</p>}
-            {it.tags.length > 0 && <p>Tags: {it.tags.join(', ')}</p>}
+            {it.tags.length > 0 && (
+              <p className="mb-1 flex flex-wrap items-center gap-1">
+                <span>Tags:</span>
+                {it.tags.map((t) => (
+                  <span
+                    key={t}
+                    className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                  >
+                    {t}
+                  </span>
+                ))}
+              </p>
+            )}
             {it.installment_count != null && (
               <p>
                 Parcela: {it.installment}/{it.installment_count}
@@ -345,7 +424,7 @@ export default function MonthView() {
   }
 
   return (
-    <div>
+    <div className="pb-20">
       <div className="mb-4 flex h-9 items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
         <button
           onClick={() => navigate(`/months/${shiftMonth(month, -1)}`)}
@@ -463,7 +542,7 @@ export default function MonthView() {
         />
         <button
           onClick={() => setFiltersOpen(!filtersOpen)}
-          className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+          className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm leading-normal text-zinc-300 hover:bg-zinc-800"
         >
           Filtros
           <span className="text-zinc-500">{filtersOpen ? '▾' : '▸'}</span>
@@ -475,7 +554,7 @@ export default function MonthView() {
           <select
             value={categoryId}
             onChange={(e) => setCategoryId(e.target.value)}
-            className="field w-44"
+            className="field w-full min-[480px]:w-44"
           >
             <option value="">Todas categorias</option>
             {categories.map((c) => (
@@ -487,7 +566,7 @@ export default function MonthView() {
           <select
             value={tagFilter}
             onChange={(e) => setTagFilter(e.target.value)}
-            className="field w-36"
+            className="field w-full min-[480px]:w-36"
           >
             <option value="">Todas tags</option>
             {allTags.map((t) => (
@@ -499,7 +578,7 @@ export default function MonthView() {
           <select
             value={bankFilter}
             onChange={(e) => setBankFilter(e.target.value)}
-            className="field w-36"
+            className="field w-full min-[480px]:w-36"
           >
             <option value="">Todos bancos</option>
             {banks.map((b) => (
@@ -511,16 +590,17 @@ export default function MonthView() {
           <select
             value={kindFilter}
             onChange={(e) => setKindFilter(e.target.value)}
-            className="field w-36"
+            className="field w-full min-[480px]:w-36"
           >
             <option value="">Tipo: todos</option>
             <option value="expense">Despesas</option>
             <option value="income">Receitas</option>
+            <option value="internal">Internas</option>
           </select>
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value)}
-            className="field w-36"
+            className="field w-full min-[480px]:w-36"
           >
             <option value="date">Ordenar: data</option>
             <option value="value">Ordenar: valor</option>
@@ -528,16 +608,48 @@ export default function MonthView() {
         </div>
       )}
 
+      {selected.size > 0 && (
+        <div className="fixed bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-full border border-zinc-700 bg-zinc-900/95 py-2 pl-5 pr-2 text-sm shadow-2xl shadow-black/50 backdrop-blur">
+          <span className="font-medium text-zinc-100">
+            {selected.size} selecionado{selected.size > 1 ? 's' : ''}
+          </span>
+          <button
+            onClick={() => setBulkOpen(true)}
+            className="rounded-full bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200"
+          >
+            Editar seleção
+          </button>
+          <button
+            onClick={() => setSelected(new Set())}
+            className="rounded-full px-3 py-1.5 text-sm text-zinc-400 hover:text-zinc-100"
+          >
+            Limpar
+          </button>
+        </div>
+      )}
+
       <div className="rounded border border-zinc-800 bg-zinc-900">
-        <button
-          onClick={() => setListOpen(!listOpen)}
-          className="flex w-full items-center gap-2 px-4 py-3 text-sm font-medium"
-        >
-          Itens
-          <span className="ml-auto text-zinc-500">{listOpen ? '▾' : '▸'}</span>
-        </button>
+        <div className="flex items-center">
+          <button
+            onClick={() => setListOpen(!listOpen)}
+            className="flex flex-1 items-center gap-2 px-4 py-3 text-sm font-medium"
+          >
+            Itens
+            <span className="ml-auto text-zinc-500">{listOpen ? '▾' : '▸'}</span>
+          </button>
+          {roots.length > 0 && (
+            <button
+              onClick={() => setSelected(allSelected ? new Set() : new Set(rootIds))}
+              className="px-4 py-3 text-xs text-zinc-400 hover:text-zinc-100"
+            >
+              {allSelected ? 'Limpar seleção' : 'Selecionar todos'}
+            </button>
+          )}
+        </div>
         {listOpen && (
-          <div className="border-t border-zinc-800 px-2 py-2">
+          <div
+            className={`border-t border-zinc-800 px-2 py-2 transition-opacity ${isPlaceholderData ? 'opacity-60' : ''}`}
+          >
             {isLoading ? (
               <p className="px-2 text-zinc-500">carregando…</p>
             ) : roots.length === 0 ? (
@@ -549,6 +661,13 @@ export default function MonthView() {
         )}
       </div>
 
+      {bulkOpen && (
+        <BulkEditModal
+          ids={[...selected]}
+          onClose={() => setBulkOpen(false)}
+          onApply={(input) => bulk.mutate(input)}
+        />
+      )}
       {form.open && (
         <ItemForm
           month={month}

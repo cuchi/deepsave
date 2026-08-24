@@ -210,6 +210,7 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
               >
                 <option value="expense">Despesa</option>
                 <option value="income">Receita</option>
+                <option value="internal">Interna</option>
               </select>
               <input
                 value={merchant}

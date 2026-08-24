@@ -9,6 +9,7 @@ import type {
   RecurringRule,
   RecurringSuggestion,
   Source,
+  TagUsage,
   UpcomingOccurrence,
 } from '../lib/types'
 
@@ -77,6 +78,16 @@ export interface ItemListParams {
   sort?: string
 }
 
+export interface BulkItemUpdateInput {
+  ids: string[]
+  kind?: string
+  /** undefined = keep, null = clear */
+  category_id?: string | null
+  tags?: string[]
+  tags_mode?: 'replace' | 'add' | 'remove'
+  update_memory?: boolean
+}
+
 export const itemsApi = {
   async list(params: ItemListParams = {}): Promise<Item[]> {
     return (await api.get<Item[]>('/items', { params })).data
@@ -92,6 +103,9 @@ export const itemsApi = {
   },
   async update(id: string, input: ItemInput): Promise<Item> {
     return (await api.patch<Item>(`/items/${id}`, input)).data
+  },
+  async bulkUpdate(input: BulkItemUpdateInput): Promise<{ updated: number }> {
+    return (await api.patch<{ updated: number }>('/items/bulk', input)).data
   },
   async remove(id: string): Promise<{ ok: boolean }> {
     return (await api.delete(`/items/${id}`)).data
@@ -209,6 +223,25 @@ export const tagsApi = {
   async list(): Promise<string[]> {
     return (await api.get<string[]>('/tags')).data
   },
+  async usage(): Promise<TagUsage[]> {
+    return (await api.get<TagUsage[]>('/tags/usage')).data
+  },
+  async rename(from: string, to: string): Promise<TagRenameResult> {
+    return (await api.patch<TagRenameResult>('/tags/rename', { from, to })).data
+  },
+  async merge(from: string, into: string): Promise<TagRenameResult> {
+    return (await api.post<TagRenameResult>('/tags/merge', { from, into })).data
+  },
+  async remove(tag: string): Promise<TagRenameResult> {
+    return (await api.delete<TagRenameResult>(`/tags/${encodeURIComponent(tag)}`)).data
+  },
+}
+
+export interface TagRenameResult {
+  ok: boolean
+  items_updated: number
+  recurring_updated: number
+  memory_updated: number
 }
 
 export interface MemoryEntry {

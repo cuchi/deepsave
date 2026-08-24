@@ -13,10 +13,17 @@ See [`PLAN.md`](./PLAN.md) for the full design.
 Builds the backend + frontend into a single image and starts it with Postgres:
 
 ```bash
-docker compose up --build
+docker compose up --build          # full app at :8080
+
+docker compose watch               # dev: rebuilds & restarts the app on code changes
 ```
 
 The app is served at http://localhost:8080 (backend serves the built frontend as a SPA).
+
+For an edit-and-reload loop use [`docker compose watch`](https://docs.docker.com/compose/how-tos/file-watch/):
+it watches the sources and rebuilds/recreates the `app` container on every save
+(BuildKit reuses the cached Rust/node dependency layers, so only the changed
+stage recompiles).
 
 ## Development
 

@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::models::{Item, ItemInput};
+use crate::models::{BulkItemUpdate, Item, ItemInput, TagsMode};
 use crate::services::{memory, tags};
 use crate::AppState;
 
@@ -15,6 +15,16 @@ pub(crate) const ITEM_COLS: &str = "id, parent_id, document_id, source, kind, st
      transfer_group_id, installment, installment_count, recurring_id, occurred_on, posted_on, \
      merchant, description, amount_cents, currency, category_id, suggested_category, tags, raw_line, \
      match_confidence, created_at, updated_at";
+
+/// Kinds a bulk edit may assign (must match what the app/parsers produce).
+const BULK_KINDS: [&str; 6] = [
+    "expense",
+    "income",
+    "refund",
+    "card_payment",
+    "investment",
+    "internal",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -101,6 +111,122 @@ pub async fn list(
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(items))
+}
+
+/// Core bulk-edit logic, kept separate from the handler so integration tests can
+/// call it without building an `AppState`. Runs the field updates in one
+/// transaction; unknown ids are silently ignored. Memory recording is a
+/// best-effort side effect performed after commit (opt-in via `update_memory`).
+pub async fn bulk_update_items(
+    pool: &PgPool,
+    input: BulkItemUpdate,
+) -> Result<serde_json::Value, AppError> {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<Uuid> = input.ids.into_iter().filter(|id| seen.insert(*id)).collect();
+    if ids.is_empty() {
+        return Err(AppError::bad_request("ids must not be empty"));
+    }
+    if ids.len() > 1000 {
+        return Err(AppError::bad_request("too many ids (max 1000)"));
+    }
+    if let Some(kind) = &input.kind {
+        if !BULK_KINDS.contains(&kind.as_str()) {
+            return Err(AppError::bad_request("invalid kind"));
+        }
+    }
+
+    let category_changed = input.category_id.is_some();
+    let tags = input.tags.as_deref().map(tags::normalize);
+    let tags_mode = input.tags_mode.unwrap_or(TagsMode::Replace);
+
+    let mut tx = pool.begin().await?;
+
+    if let Some(kind) = &input.kind {
+        sqlx::query("UPDATE items SET kind = $1, updated_at = now() WHERE id = ANY($2)")
+            .bind(kind)
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if let Some(category_id) = input.category_id {
+        sqlx::query("UPDATE items SET category_id = $1, updated_at = now() WHERE id = ANY($2)")
+            .bind(category_id)
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if let Some(tags) = &tags {
+        match tags_mode {
+            TagsMode::Replace => {
+                sqlx::query("UPDATE items SET tags = $1, updated_at = now() WHERE id = ANY($2)")
+                    .bind(tags)
+                    .bind(&ids)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            TagsMode::Add => {
+                // `tags || $1` then dedupe, keeping first-occurrence order
+                // (tags must stay unique per item).
+                sqlx::query(
+                    "UPDATE items SET tags = (\
+                       SELECT array_agg(t ORDER BY ord) \
+                       FROM (SELECT t, min(ord) AS ord \
+                             FROM unnest(tags || $1) WITH ORDINALITY AS u(t, ord) \
+                             GROUP BY t) s \
+                     ), updated_at = now() WHERE id = ANY($2)",
+                )
+                .bind(tags)
+                .bind(&ids)
+                .execute(&mut *tx)
+                .await?;
+            }
+            TagsMode::Remove => {
+                sqlx::query(
+                    "UPDATE items SET tags = (SELECT array_agg(t) FROM unnest(tags) AS t \
+                     WHERE NOT (t = ANY($1))), updated_at = now() WHERE id = ANY($2)",
+                )
+                .bind(tags)
+                .bind(&ids)
+                .execute(&mut *tx)
+                .await?;
+            }
+        };
+    }
+
+    tx.commit().await?;
+
+    // Memory is a side channel: run after commit, opt-in only, and only when the
+    // category is actually being changed. `category_id` here is Copy, so it is
+    // still available after the match above.
+    if input.update_memory && category_changed {
+        let merchants: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT merchant FROM items WHERE id = ANY($1) AND merchant IS NOT NULL",
+        )
+        .bind(&ids)
+        .fetch_all(pool)
+        .await?;
+        for m in &merchants {
+            memory::record_confirmation(pool, m, input.category_id.flatten()).await?;
+        }
+    }
+
+    // Report how many of the selected ids actually exist (unknown ids ignored).
+    let updated: i64 = sqlx::query_scalar("SELECT count(*) FROM items WHERE id = ANY($1)")
+        .bind(&ids)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(json!({ "updated": updated }))
+}
+
+/// `PATCH /items/bulk` — thin wrapper over [`bulk_update_items`].
+pub async fn bulk_update(
+    State(state): State<AppState>,
+    Json(input): Json<BulkItemUpdate>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(bulk_update_items(&state.pool, input).await?))
 }
 
 pub async fn get(
@@ -236,16 +362,6 @@ pub async fn reject(
 ) -> Result<Json<serde_json::Value>, AppError> {
     set_item_status(&state, id, "rejected").await?;
     Ok(Json(json!({ "ok": true })))
-}
-
-/// Distinct normalized tags across all items (for autocomplete + filters).
-pub async fn list_tags(State(state): State<AppState>) -> Result<Json<Vec<String>>, AppError> {
-    let tags: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT tag FROM items CROSS JOIN LATERAL unnest(tags) AS tag ORDER BY tag",
-    )
-    .fetch_all(&state.pool)
-    .await?;
-    Ok(Json(tags))
 }
 
 /// Apply the remembered category for this item's merchant (one-click).

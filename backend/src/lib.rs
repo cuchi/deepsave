@@ -11,7 +11,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::middleware;
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
@@ -136,7 +136,12 @@ pub async fn run() -> anyhow::Result<()> {
             "/items",
             get(routes::items::list).post(routes::items::create),
         )
-        .route("/tags", get(routes::items::list_tags))
+        .route("/items/bulk", patch(routes::items::bulk_update))
+        .route("/tags", get(routes::tags::list))
+        .route("/tags/usage", get(routes::tags::usage))
+        .route("/tags/rename", patch(routes::tags::rename))
+        .route("/tags/merge", post(routes::tags::merge))
+        .route("/tags/{tag}", delete(routes::tags::delete_tag))
         .route(
             "/items/{id}",
             get(routes::items::get)
