@@ -104,7 +104,7 @@ pub async fn upload(
     let doc = sqlx::query_as::<_, DocumentSummary>(sqlx::AssertSqlSafe(format!(
         "INSERT INTO documents (kind, filename, content_type, sha256, file_path, status, source_id)
          VALUES ($1, $2, $3, $4, $5, 'pending', $6)
-         RETURNING {DOC_SUMMARY_COLS}, 0::bigint AS item_count"
+         RETURNING {DOC_SUMMARY_COLS}, 0::bigint AS item_count, NULL::date AS first_date, NULL::date AS last_date"
     )))
     .bind(&kind)
     .bind(&filename)
@@ -122,7 +122,9 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<DocumentSumm
     let docs = sqlx::query_as::<_, DocumentSummary>(
         "SELECT d.id, d.kind, d.filename, d.content_type, d.status, d.error_message,
                 d.uploaded_at, d.processed_at, d.source_id,
-                (SELECT count(*) FROM items i WHERE i.document_id = d.id) AS item_count
+                (SELECT count(*) FROM items i WHERE i.document_id = d.id) AS item_count,
+                (SELECT min(i.occurred_on) FROM items i WHERE i.document_id = d.id) AS first_date,
+                (SELECT max(i.occurred_on) FROM items i WHERE i.document_id = d.id) AS last_date
          FROM documents d
          ORDER BY d.uploaded_at DESC",
     )

@@ -81,6 +81,7 @@ export default function Memory() {
   })
   const remove = useMutation({ mutationFn: memoryApi.remove, onSuccess: invalidate })
   const applyAll = useMutation({ mutationFn: memoryApi.applyAll, onSuccess: invalidate })
+  const applyAllGlobal = useMutation({ mutationFn: memoryApi.applyAllGlobal, onSuccess: invalidate })
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
@@ -93,9 +94,17 @@ export default function Memory() {
 
   return (
     <div>
-      <h1 className="mb-2 text-xl font-bold">Memória</h1>
+      <div className="mb-4 flex items-center gap-3">
+        <h1 className="text-xl font-bold">Memória</h1>
+        <button
+          onClick={() => applyAllGlobal.mutate()}
+          className="rounded bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900"
+        >
+          Aplicar todas
+        </button>
+      </div>
       <p className="mb-4 text-sm text-zinc-500">
-        Comerciante → categoria aprendida. Alimenta a IA e os botões “aplicar”.
+        Comerciante → categoria aprendida. Alimenta a IA e o botão “Aplicar todas”.
       </p>
 
       <form onSubmit={submit} className="mb-6 flex flex-wrap gap-2">
@@ -118,7 +127,7 @@ export default function Memory() {
         </button>
       </form>
 
-      <div className="space-y-2">
+      <div className="space-y-1.5">
         {entries.length === 0 ? (
           <p className="text-sm text-zinc-500">Nenhuma memória ainda.</p>
         ) : (

@@ -2,6 +2,7 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -102,6 +103,31 @@ pub struct ApplyAllRequest {
     pub merchant: String,
 }
 
+async fn apply_merchant(pool: &PgPool, normalized: &str, category_id: Uuid) -> Result<usize, AppError> {
+    let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT id, merchant FROM items WHERE merchant IS NOT NULL AND category_id IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut updated = 0;
+    for (id, item_merchant) in rows {
+        if let Some(m) = item_merchant {
+            if tags::strip_accents(m.trim()).to_lowercase() == normalized {
+                sqlx::query(
+                    "UPDATE items SET category_id = $1, updated_at = now() WHERE id = $2",
+                )
+                .bind(category_id)
+                .bind(id)
+                .execute(pool)
+                .await?;
+                updated += 1;
+            }
+        }
+    }
+    Ok(updated)
+}
+
 /// Apply the merchant's remembered category to every *uncategorized* item of
 /// that merchant (any status). Tags are situational and are NOT applied.
 pub async fn apply_all(
@@ -120,27 +146,23 @@ pub async fn apply_all(
         return Err(AppError::not_found("no categorization memory for this merchant"));
     };
 
-    let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT id, merchant FROM items WHERE merchant IS NOT NULL AND category_id IS NULL",
+    let updated = apply_merchant(&state.pool, &normalized, category_id).await?;
+    Ok(Json(json!({ "updated": updated })))
+}
+
+/// Apply every memory entry's category to its uncategorized items.
+pub async fn apply_all_global(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let entries: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT merchant, category_id FROM merchant_memory WHERE category_id IS NOT NULL",
     )
     .fetch_all(&state.pool)
     .await?;
 
-    let mut updated = 0;
-    for (id, item_merchant) in rows {
-        if let Some(m) = item_merchant {
-            if tags::strip_accents(m.trim()).to_lowercase() == normalized {
-                sqlx::query(
-                    "UPDATE items SET category_id = $1, updated_at = now() WHERE id = $2",
-                )
-                .bind(category_id)
-                .bind(id)
-                .execute(&state.pool)
-                .await?;
-                updated += 1;
-            }
-        }
+    let mut total = 0;
+    for (merchant, category_id) in entries {
+        total += apply_merchant(&state.pool, &merchant, category_id).await?;
     }
-
-    Ok(Json(json!({ "updated": updated })))
+    Ok(Json(json!({ "updated": total })))
 }

@@ -47,6 +47,19 @@ Dashboard page: summary cards, category pie, 12-month line, top merchants.
 Item search/filter (`search`, `category_id`, `kind`), item-level duplicate detection on ingest,
 request logging (TraceLayer), 5 unit tests.
 
+### M7 — Recurring items
+`recurring_rules` CRUD + `/recurring` page (suggestions, rules, upcoming). Detection heuristics
+(same merchant + similar amount + regular interval, ≥2 repeats; installments excluded).
+Rules are **analytics-only** — they never create items. Dashboard "Recorrentes" count.
+
+### M8 — Sources & coverage
+`/coverage` page + dashboard "missing sources" alert. `sources` table (6 fundamental sources),
+`documents.source_id` auto-detected from content, `COVERAGE_MONTHS` (default 12), startup backfill.
+
+### M9 — New parsers + parser refactor
+Moved parsers under `services/parsers/` (shared `ParsedItem`). Added **C6 bank statement CSV**
+and **Caixa credit-card fatura PDF** parsers; `investment` + `card_payment` kinds; images→receipt.
+
 ## Established decisions (as implemented)
 
 - PostgreSQL (SQLite rejected); signed-cookie auth; single `APP_PASSWORD` / `APP_PASSWORD_HASH`.

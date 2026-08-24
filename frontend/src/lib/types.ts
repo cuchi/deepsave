@@ -45,6 +45,8 @@ export interface DocumentSummary {
   processed_at: string | null
   item_count: number
   source_id: string | null
+  first_date: string | null
+  last_date: string | null
 }
 
 export interface DocumentDetail extends DocumentSummary {
@@ -87,4 +89,42 @@ export interface CoverageSource {
 export interface CoverageData {
   months: string[]
   sources: CoverageSource[]
+}
+
+export interface RecurringRule {
+  id: string
+  merchant: string | null
+  description: string
+  amount_cents: number
+  currency: string
+  category_id: string | null
+  category_name: string | null
+  frequency: string
+  interval: number
+  day_of_month: number | null
+  next_due_on: string | null
+  is_active: boolean
+  source: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RecurringSuggestion {
+  merchant: string | null
+  description: string
+  amount_cents: number
+  frequency: string
+  interval: number
+  count: number
+  last_seen: string
+}
+
+export interface UpcomingOccurrence {
+  id: string
+  merchant: string | null
+  description: string
+  amount_cents: number
+  frequency: string
+  next_due_on: string
+  days_until: number
 }

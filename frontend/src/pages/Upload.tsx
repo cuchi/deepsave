@@ -1,8 +1,9 @@
 import { useCallback, useState } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { documentsApi, type DocumentKind } from '../api/client'
+import { documentsApi, sourcesApi, type DocumentKind } from '../api/client'
 import type { DocumentSummary } from '../lib/types'
+import BankLogo from '../components/BankLogo'
 
 const KIND_LABELS: Record<DocumentKind, string> = {
   card_statement: 'Fatura de cartão',
@@ -19,12 +20,25 @@ const STATUS_STYLES: Record<string, string> = {
   failed: 'text-red-400',
 }
 
+function fmtDate(d: string): string {
+  return `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}`
+}
+
+function dateRange(doc: DocumentSummary): string {
+  if (!doc.first_date && !doc.last_date) return ''
+  const first = doc.first_date ?? doc.last_date!
+  const last = doc.last_date ?? doc.first_date!
+  return first === last ? fmtDate(first) : `${fmtDate(first)} → ${fmtDate(last)}`
+}
+
 function DocRow({
   doc,
+  bank,
   onDelete,
   onReprocess,
 }: {
   doc: DocumentSummary
+  bank?: string | null
   onDelete: (id: string) => void
   onReprocess: (id: string) => void
 }) {
@@ -35,14 +49,17 @@ function DocRow({
     enabled: open,
   })
 
+  const range = dateRange(doc)
+
   return (
     <div className="rounded border border-zinc-800 bg-zinc-900">
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm"
       >
-        <span className="font-medium">{doc.filename}</span>
-        <span className="text-xs text-zinc-500">{KIND_LABELS[doc.kind as DocumentKind]}</span>
+        <BankLogo bank={bank} />
+        <span className="font-medium">{KIND_LABELS[doc.kind as DocumentKind]}</span>
+        {range && <span className="text-xs tabular-nums text-zinc-500">{range}</span>}
         <span className="text-xs text-zinc-500">{doc.item_count} itens</span>
         <span className={`ml-auto text-xs ${STATUS_STYLES[doc.status] ?? 'text-zinc-400'}`}>
           {doc.status}
@@ -73,6 +90,9 @@ function DocRow({
 
       {open && (
         <div className="border-t border-zinc-800 p-3">
+          <p className="mb-2 text-xs text-zinc-400">
+            <span className="text-zinc-300">{doc.filename}</span>
+          </p>
           {doc.error_message && (
             <p className="mb-2 text-xs text-red-400">{doc.error_message}</p>
           )}
@@ -103,6 +123,9 @@ export default function Upload() {
     queryFn: documentsApi.list,
     refetchInterval: 3000,
   })
+  const { data: sources = [] } = useQuery({ queryKey: ['sources'], queryFn: sourcesApi.list })
+
+  const bankBySource = new Map(sources.map((s) => [s.id, s.bank]))
 
   const remove = useMutation({
     mutationFn: documentsApi.remove,
@@ -118,7 +141,6 @@ export default function Upload() {
       for (const file of files) {
         setUploading(true)
         try {
-          // Images are always receipts, regardless of the dropdown selection.
           const effectiveKind: DocumentKind = file.type.startsWith('image/')
             ? 'receipt'
             : kind
@@ -174,6 +196,7 @@ export default function Upload() {
             <DocRow
               key={d.id}
               doc={d}
+              bank={d.source_id ? bankBySource.get(d.source_id) : undefined}
               onDelete={(id) => remove.mutate(id)}
               onReprocess={(id) => reprocess.mutate(id)}
             />

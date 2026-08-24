@@ -181,7 +181,7 @@ fn parse_c6_invoice(
         let category = rec[3].trim().to_string();
         let description = rec[4].trim().to_string();
         let (installment, installment_count) = parse_parcela(rec[5].trim());
-        let (cents, _negative) = parse_amount(rec[8].trim())?;
+        let (cents, negative) = parse_amount(rec[8].trim())?;
         if cents == 0 {
             continue;
         }
@@ -192,12 +192,25 @@ fn parse_c6_invoice(
             _ => purchase_date,
         };
 
+        // Negative Valor(em R$) is a credit on the card: a refund/reversal
+        // (or a payment included in the bill, which is neutral).
+        let (amount_cents, kind) = if negative {
+            let dl = description.to_lowercase();
+            if dl.contains("inclusao de pagamento") || dl.contains("pagamento fatura") {
+                (-cents, "card_payment")
+            } else {
+                (cents, "refund")
+            }
+        } else {
+            (-cents, "expense")
+        };
+
         out.push(ParsedItem {
             occurred_on,
             description: description.clone(),
             merchant: Some(description),
-            amount_cents: -cents,
-            kind: "expense".into(),
+            amount_cents,
+            kind: kind.into(),
             category: map_c6_category(&category),
             installment,
             installment_count,

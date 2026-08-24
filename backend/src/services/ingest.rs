@@ -25,6 +25,8 @@ pub async fn process_document(pool: &PgPool, doc: &DocumentRow, ai: &AiClient) -
 
     // After any ingestion, try to link receipts to statement items.
     linking::suggest_links_all(pool).await?;
+    // And fix up Pix expenses that were actually card payments.
+    reclassify_card_payments(pool).await?;
     Ok(())
 }
 
@@ -57,6 +59,42 @@ async fn process_csv(pool: &PgPool, doc: &DocumentRow) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Reclassify bank-statement Pix/ENVIO expenses that match a known card payment
+/// (same |amount|, within a few days) as `card_payment` — they were paying a card.
+pub async fn reclassify_card_payments(pool: &PgPool) -> Result<usize> {
+    let card_payments: Vec<(i64, NaiveDate)> = sqlx::query_as(
+        "SELECT abs(amount_cents), occurred_on FROM items WHERE kind = 'card_payment'",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let expenses: Vec<(Uuid, i64, NaiveDate, String)> = sqlx::query_as(
+        "SELECT id, abs(amount_cents), occurred_on, COALESCE(description, '')
+         FROM items
+         WHERE kind = 'expense' AND source = 'bank_statement'",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut updated = 0;
+    for (id, amount, date, description) in expenses {
+        let lower = description.to_lowercase();
+        if !(lower.contains("pix") || lower.contains("envio")) {
+            continue;
+        }
+        if card_payments.iter().any(|(cp_amount, cp_date)| {
+            *cp_amount == amount && (date - *cp_date).num_days().abs() <= 5
+        }) {
+            sqlx::query("UPDATE items SET kind = 'card_payment', updated_at = now() WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await?;
+            updated += 1;
+        }
+    }
+    Ok(updated)
 }
 
 fn statement_source(doc: &DocumentRow) -> &'static str {

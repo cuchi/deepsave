@@ -5,4 +5,5 @@ pub mod documents;
 pub mod items;
 pub mod matches;
 pub mod memory;
+pub mod recurring;
 pub mod sources;

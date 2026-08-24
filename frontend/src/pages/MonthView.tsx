@@ -20,6 +20,7 @@ import {
   dashboardApi,
   documentsApi,
   itemsApi,
+  recurringApi,
   sourcesApi,
   tagsApi,
 } from '../api/client'
@@ -102,6 +103,10 @@ export default function MonthView() {
   const [search, setSearch] = useState('')
   const [categoryId, setCategoryId] = useState('')
   const [tagFilter, setTagFilter] = useState('')
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [bankFilter, setBankFilter] = useState('')
+  const [kindFilter, setKindFilter] = useState('')
+  const [sortBy, setSortBy] = useState('date')
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [detailsFor, setDetailsFor] = useState<string | null>(null)
   const [graphsOpen, setGraphsOpen] = useState(true)
@@ -115,13 +120,16 @@ export default function MonthView() {
   const { data: coverage } = useQuery({ queryKey: ['coverage'], queryFn: coverageApi.get })
 
   const { data: items = [], isLoading } = useQuery({
-    queryKey: ['items', month, search, categoryId, tagFilter],
+    queryKey: ['items', month, search, categoryId, tagFilter, bankFilter, kindFilter, sortBy],
     queryFn: () =>
       itemsApi.list({
         month,
         search: search || undefined,
         category_id: categoryId || undefined,
         tag: tagFilter || undefined,
+        bank: bankFilter || undefined,
+        kind: kindFilter || undefined,
+        sort: sortBy || undefined,
       }),
   })
 
@@ -133,6 +141,10 @@ export default function MonthView() {
     queryKey: ['dashboard-trend'],
     queryFn: () => dashboardApi.trend(12),
   })
+  const { data: upcoming = [] } = useQuery({
+    queryKey: ['recurring-upcoming'],
+    queryFn: recurringApi.upcoming,
+  })
 
   const del = useMutation({
     mutationFn: (id: string) => itemsApi.remove(id),
@@ -141,6 +153,7 @@ export default function MonthView() {
 
   const catById = new Map(categories.map((c) => [c.id, c]))
   const bankBySource = new Map(sources.map((s) => [s.id, s.bank]))
+  const banks = [...new Set(sources.map((s) => s.bank))].sort()
   const bankByDoc = new Map(
     docs.map((d) => [d.id, d.source_id ? bankBySource.get(d.source_id) : undefined]),
   )
@@ -158,9 +171,6 @@ export default function MonthView() {
     }
   }
   const roots = items.filter((i) => i.parent_id === null)
-
-  const expenses = items.filter((i) => i.kind === 'expense').reduce((s, i) => s + i.amount_cents, 0)
-  const income = items.filter((i) => i.kind === 'income').reduce((s, i) => s + i.amount_cents, 0)
 
   const missingSources = (coverage?.sources ?? []).filter((s) => s.enabled && !s.present.includes(month))
 
@@ -336,64 +346,21 @@ export default function MonthView() {
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <div className="flex h-9 w-full items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
-          <button
-            onClick={() => navigate(`/months/${shiftMonth(month, -1)}`)}
-            className="h-full px-3 text-base text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-          >
-            ‹
-          </button>
-          <span className="flex-1 text-center text-sm font-medium capitalize">
-            {monthLabel(month)}
-          </span>
-          <button
-            onClick={() => navigate(`/months/${shiftMonth(month, 1)}`)}
-            className="h-full px-3 text-base text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-          >
-            ›
-          </button>
-        </div>
-
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Buscar…"
-          className="field w-48"
-        />
-        <select
-          value={categoryId}
-          onChange={(e) => setCategoryId(e.target.value)}
-          className="field w-44"
-        >
-          <option value="">Todas categorias</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-        <select
-          value={tagFilter}
-          onChange={(e) => setTagFilter(e.target.value)}
-          className="field w-36"
-        >
-          <option value="">Todas tags</option>
-          {allTags.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
-        <div className="ml-auto text-sm text-zinc-400">
-          Despesas: <span className="font-medium text-zinc-100">{fmtCents(expenses)}</span> · Receitas:{' '}
-          <span className="font-medium text-zinc-100">{fmtCents(income)}</span>
-        </div>
+      <div className="mb-4 flex h-9 items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
         <button
-          onClick={() => setForm({ open: true })}
-          className="rounded bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900"
+          onClick={() => navigate(`/months/${shiftMonth(month, -1)}`)}
+          className="h-full px-3 text-base text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
         >
-          + Item
+          ‹
+        </button>
+        <span className="flex-1 text-center text-sm font-medium capitalize">
+          {monthLabel(month)}
+        </span>
+        <button
+          onClick={() => navigate(`/months/${shiftMonth(month, 1)}`)}
+          className="h-full px-3 text-base text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+        >
+          ›
         </button>
       </div>
 
@@ -413,7 +380,7 @@ export default function MonthView() {
         </button>
         {graphsOpen && (
           <div className="border-t border-zinc-800 p-4">
-            <div className="mb-4 grid grid-cols-3 gap-3">
+            <div className="mb-4 grid grid-cols-4 gap-3">
               <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
                 <p className="text-xs text-zinc-500">Despesas</p>
                 <p className="text-lg font-semibold tabular-nums">{fmtCents(dash?.total_spend_cents ?? 0)}</p>
@@ -427,6 +394,10 @@ export default function MonthView() {
               <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
                 <p className="text-xs text-zinc-500">Pendentes</p>
                 <p className="text-lg font-semibold tabular-nums text-amber-400">{dash?.pending_count ?? 0}</p>
+              </div>
+              <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
+                <p className="text-xs text-zinc-500">Recorrentes</p>
+                <p className="text-lg font-semibold tabular-nums text-cyan-400">{upcoming.length}</p>
               </div>
             </div>
 
@@ -482,6 +453,80 @@ export default function MonthView() {
           </div>
         )}
       </div>
+
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Buscar…"
+          className="field w-64"
+        />
+        <button
+          onClick={() => setFiltersOpen(!filtersOpen)}
+          className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+        >
+          Filtros
+          <span className="text-zinc-500">{filtersOpen ? '▾' : '▸'}</span>
+        </button>
+      </div>
+
+      {filtersOpen && (
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <select
+            value={categoryId}
+            onChange={(e) => setCategoryId(e.target.value)}
+            className="field w-44"
+          >
+            <option value="">Todas categorias</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <select
+            value={tagFilter}
+            onChange={(e) => setTagFilter(e.target.value)}
+            className="field w-36"
+          >
+            <option value="">Todas tags</option>
+            {allTags.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <select
+            value={bankFilter}
+            onChange={(e) => setBankFilter(e.target.value)}
+            className="field w-36"
+          >
+            <option value="">Todos bancos</option>
+            {banks.map((b) => (
+              <option key={b} value={b}>
+                {b === 'nubank' ? 'Nubank' : b === 'c6' ? 'C6' : b === 'caixa' ? 'Caixa' : b}
+              </option>
+            ))}
+          </select>
+          <select
+            value={kindFilter}
+            onChange={(e) => setKindFilter(e.target.value)}
+            className="field w-36"
+          >
+            <option value="">Tipo: todos</option>
+            <option value="expense">Despesas</option>
+            <option value="income">Receitas</option>
+          </select>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            className="field w-36"
+          >
+            <option value="date">Ordenar: data</option>
+            <option value="value">Ordenar: valor</option>
+          </select>
+        </div>
+      )}
 
       <div className="rounded border border-zinc-800 bg-zinc-900">
         <button

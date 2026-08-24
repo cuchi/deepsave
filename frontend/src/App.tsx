@@ -8,6 +8,7 @@ import Upload from './pages/Upload'
 import Review from './pages/Review'
 import Coverage from './pages/Coverage'
 import Memory from './pages/Memory'
+import Recurring from './pages/Recurring'
 import Layout from './components/Layout'
 
 export default function App() {
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="/review" element={<Review />} />
         <Route path="/coverage" element={<Coverage />} />
         <Route path="/memory" element={<Memory />} />
+        <Route path="/recurring" element={<Recurring />} />
       </Route>
       <Route path="*" element={<Navigate to={authed ? '/' : '/login'} replace />} />
     </Routes>

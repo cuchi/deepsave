@@ -101,6 +101,12 @@ pub async fn run() -> anyhow::Result<()> {
     let ai = AiClient::new(&config, pool.clone());
     tokio::spawn(services::queue::run_worker(pool.clone(), ai.clone()));
     tokio::spawn(services::sources::backfill_null_sources(pool.clone()));
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let _ = services::ingest::reclassify_card_payments(&pool).await;
+        });
+    }
 
     let session_key = if config.session_secret.len() >= 32 {
         Key::derive_from(config.session_secret.as_bytes())
@@ -147,6 +153,17 @@ pub async fn run() -> anyhow::Result<()> {
             patch(routes::memory::update_memory).delete(routes::memory::delete_memory),
         )
         .route("/memory/apply-all", post(routes::memory::apply_all))
+        .route("/memory/apply-all-global", post(routes::memory::apply_all_global))
+        .route(
+            "/recurring",
+            get(routes::recurring::list).post(routes::recurring::create),
+        )
+        .route(
+            "/recurring/{id}",
+            patch(routes::recurring::update).delete(routes::recurring::delete),
+        )
+        .route("/recurring/upcoming", get(routes::recurring::upcoming))
+        .route("/recurring/suggestions", get(routes::recurring::suggestions))
         .route(
             "/documents",
             get(routes::documents::list)

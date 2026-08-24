@@ -58,6 +58,7 @@ cd frontend && npm run build       # type-check + build frontend
 - **OCR/PDF** text extraction is in `backend/src/services/extract.rs` (tesseract CLI + pdf-extract); AI structuring is the fallback for non-structured PDFs.
 - **Linking / memory** live in `backend/src/services/{linking,memory}.rs`. Receipt→statement match suggestions are created on receipt ingestion; confirm them via `/api/matches/{id}/accept`. Merchant memory is upserted on item confirm/edit and injected into AI prompts (gated at `confirm_count >= 2`).
 - **Categories are intrinsic to a merchant; tags are situational.** Memory auto-applies only the *category* (`apply-memory` / `apply-all`); tags are per-item and never bulk-applied.
+- **Recurring items** live in `backend/src/services/recurring.rs` + `routes/recurring.rs`. Detection is suggestion-only (user confirms). Rules are **analytics-only — they never auto-create items** (avoids double-counting with statement items); `upcoming` is a pure forecast.
 
 ## Before committing
 

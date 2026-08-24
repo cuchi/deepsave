@@ -5,5 +5,6 @@ pub mod linking;
 pub mod memory;
 pub mod parsers;
 pub mod queue;
+pub mod recurring;
 pub mod sources;
 pub mod tags;

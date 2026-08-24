@@ -28,6 +28,10 @@ pub struct ListQuery {
     pub kind: Option<String>,
     /// Filter by an exact tag.
     pub tag: Option<String>,
+    /// Filter by bank ('nubank' | 'c6' | 'caixa').
+    pub bank: Option<String>,
+    /// 'date' (default) or 'value'.
+    pub sort: Option<String>,
 }
 
 fn month_range(month: Option<&str>) -> Result<(Option<NaiveDate>, Option<NaiveDate>), AppError> {
@@ -77,7 +81,13 @@ pub async fn list(
            AND ($5::uuid IS NULL OR category_id = $5)
            AND ($6::text IS NULL OR kind = $6)
            AND ($7::text IS NULL OR $7 = ANY(tags))
-         ORDER BY occurred_on DESC, created_at DESC"
+           AND ($8::text IS NULL OR EXISTS (
+                 SELECT 1 FROM documents d
+                 JOIN sources s ON s.id = d.source_id
+                 WHERE d.id = items.document_id AND s.bank = $8))
+         ORDER BY
+           CASE WHEN $9 = 'value' THEN abs(amount_cents) END DESC,
+           occurred_on DESC, created_at DESC"
     )))
     .bind(start)
     .bind(end)
@@ -86,6 +96,8 @@ pub async fn list(
     .bind(q.category_id)
     .bind(q.kind)
     .bind(q.tag)
+    .bind(q.bank)
+    .bind(q.sort)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(items))

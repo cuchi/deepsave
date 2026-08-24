@@ -74,8 +74,11 @@ pub struct ItemInput {
     pub parent_id: Option<Uuid>,
     #[serde(default = "default_kind")]
     pub kind: String,
+    #[serde(default)]
     pub account_id: Option<Uuid>,
+    #[serde(default)]
     pub installment: Option<i32>,
+    #[serde(default)]
     pub installment_count: Option<i32>,
     pub occurred_on: NaiveDate,
     pub merchant: Option<String>,
@@ -121,6 +124,8 @@ pub struct DocumentSummary {
     pub processed_at: Option<DateTime<Utc>>,
     pub item_count: i64,
     pub source_id: Option<Uuid>,
+    pub first_date: Option<NaiveDate>,
+    pub last_date: Option<NaiveDate>,
 }
 
 /// Full document detail for the API.
@@ -180,4 +185,25 @@ pub struct MemoryEntry {
     pub confidence: f32,
     pub confirm_count: i32,
     pub last_confirmed_at: Option<DateTime<Utc>>,
+}
+
+// ---------- Recurring rules ----------
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct RecurringRule {
+    pub id: Uuid,
+    pub merchant: Option<String>,
+    pub description: String,
+    pub amount_cents: i64,
+    pub currency: String,
+    pub category_id: Option<Uuid>,
+    pub category_name: Option<String>,
+    pub frequency: String,
+    pub interval: i32,
+    pub day_of_month: Option<i32>,
+    pub next_due_on: Option<NaiveDate>,
+    pub is_active: bool,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }

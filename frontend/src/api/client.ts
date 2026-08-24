@@ -6,7 +6,10 @@ import type {
   DocumentSummary,
   Item,
   MatchDetail,
+  RecurringRule,
+  RecurringSuggestion,
   Source,
+  UpcomingOccurrence,
 } from '../lib/types'
 
 const api = axios.create({ baseURL: '/api', withCredentials: true })
@@ -70,6 +73,8 @@ export interface ItemListParams {
   category_id?: string
   kind?: string
   tag?: string
+  bank?: string
+  sort?: string
 }
 
 export const itemsApi = {
@@ -240,5 +245,41 @@ export const memoryApi = {
   },
   async applyAll(merchant: string): Promise<{ updated: number }> {
     return (await api.post('/memory/apply-all', { merchant })).data
+  },
+  async applyAllGlobal(): Promise<{ updated: number }> {
+    return (await api.post('/memory/apply-all-global')).data
+  },
+}
+
+export interface RecurringInput {
+  merchant?: string | null
+  description: string
+  amount_cents: number
+  category_id?: string | null
+  frequency: string
+  interval?: number
+  day_of_month?: number | null
+  next_due_on?: string | null
+  is_active?: boolean
+}
+
+export const recurringApi = {
+  async list(): Promise<RecurringRule[]> {
+    return (await api.get<RecurringRule[]>('/recurring')).data
+  },
+  async create(input: RecurringInput): Promise<RecurringRule> {
+    return (await api.post<RecurringRule>('/recurring', input)).data
+  },
+  async update(id: string, input: RecurringInput): Promise<RecurringRule> {
+    return (await api.patch<RecurringRule>(`/recurring/${id}`, input)).data
+  },
+  async remove(id: string): Promise<{ ok: boolean }> {
+    return (await api.delete(`/recurring/${id}`)).data
+  },
+  async upcoming(): Promise<UpcomingOccurrence[]> {
+    return (await api.get<UpcomingOccurrence[]>('/recurring/upcoming')).data
+  },
+  async suggestions(): Promise<RecurringSuggestion[]> {
+    return (await api.get<RecurringSuggestion[]>('/recurring/suggestions')).data
   },
 }

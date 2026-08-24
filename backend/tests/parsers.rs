@@ -113,6 +113,31 @@ fn c6_card_fixture_parses() {
 }
 
 #[test]
+fn c6_negative_amount_is_refund_or_card_payment() {
+    let content = "Data de Compra;Nome;Final;Categoria;Descrição;Parcela;USD;Cotação;R$\n\
+04/07/2026;X;1;-;Anuidade Diferenciada;Única;0;0;98.00\n\
+04/07/2026;X;1;-;Estorno Tarifa;Única;0;0;-98.00\n\
+14/06/2026;X;1;-;Inclusao de Pagamento;Única;0;0;-19481.11\n\
+09/07/2026;X;1;-;Pagamento Fatura QR CODE;Única;0;0;-31620.43\n";
+    let items = csv::parse_csv(content, None).unwrap();
+
+    let anuidade = items.iter().find(|i| i.description == "Anuidade Diferenciada").unwrap();
+    assert_eq!(anuidade.amount_cents, -9800);
+    assert_eq!(anuidade.kind, "expense");
+
+    let estorno = items.iter().find(|i| i.description == "Estorno Tarifa").unwrap();
+    assert_eq!(estorno.amount_cents, 9800);
+    assert_eq!(estorno.kind, "refund");
+
+    let pagamento = items.iter().find(|i| i.description == "Inclusao de Pagamento").unwrap();
+    assert_eq!(pagamento.kind, "card_payment");
+
+    let fatura = items.iter().find(|i| i.description == "Pagamento Fatura QR CODE").unwrap();
+    assert_eq!(fatura.kind, "card_payment");
+    assert_eq!(fatura.amount_cents, -3162043);
+}
+
+#[test]
 fn tags_are_normalized() {
     use deepsave_backend::services::tags;
     let out = tags::normalize(&[

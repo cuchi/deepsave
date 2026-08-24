@@ -35,6 +35,9 @@ export default function Layout() {
             <Link to="/memory" className="hover:text-zinc-100">
               Memória
             </Link>
+            <Link to="/recurring" className="hover:text-zinc-100">
+              Recorrentes
+            </Link>
             <Link to="/categories" className="hover:text-zinc-100">
               Categorias
             </Link>
