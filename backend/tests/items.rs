@@ -11,9 +11,9 @@ fn base_query() -> ListQuery {
         month: None,
         status: None,
         search: None,
-        category_id: None,
+        category_ids: None,
         kind: None,
-        tag: None,
+        tags: None,
         bank: None,
         sort: None,
         limit: None,
@@ -183,4 +183,147 @@ async fn date_range_filters_list_and_summary(pool: PgPool) {
     q.date_to = Some("2026-09-30".parse().unwrap());
     let s = summary(&pool, &q).await.unwrap();
     assert_eq!(s.count, 3);
+}
+
+#[test]
+fn item_input_update_memory_defaults_to_on() {
+    use deepsave_backend::models::ItemInput;
+
+    // Omitted → feeds memory (a single edit is a correction).
+    let input: ItemInput = serde_json::from_str(
+        r#"{"occurred_on": "2026-01-01", "description": "x", "amount_cents": -100}"#,
+    )
+    .unwrap();
+    assert!(input.update_memory);
+
+    // Explicit opt-out.
+    let input: ItemInput = serde_json::from_str(
+        r#"{"occurred_on": "2026-01-01", "description": "x", "amount_cents": -100, "update_memory": false}"#,
+    )
+    .unwrap();
+    assert!(!input.update_memory);
+}
+
+#[sqlx::test]
+async fn multi_category_and_multi_tag_filters(pool: PgPool) {
+    common::migrate(&pool).await;
+    let cat_a: sqlx::types::Uuid =
+        sqlx::query_scalar("INSERT INTO categories (name) VALUES ('CatA') RETURNING id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let cat_b: sqlx::types::Uuid =
+        sqlx::query_scalar("INSERT INTO categories (name) VALUES ('CatB') RETURNING id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let cat_c: sqlx::types::Uuid =
+        sqlx::query_scalar("INSERT INTO categories (name) VALUES ('CatC') RETURNING id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, category_id, tags)
+         VALUES ('manual', 'expense', 'confirmed', '2026-07-01', 'em A', -100, $1, '{x}'),
+                ('manual', 'expense', 'confirmed', '2026-07-01', 'em B', -200, $2, '{y}'),
+                ('manual', 'expense', 'confirmed', '2026-07-01', 'em C', -300, $3, '{x,y}')",
+    )
+    .bind(cat_a)
+    .bind(cat_b)
+    .bind(cat_c)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let names = |items: Vec<deepsave_backend::models::Item>| {
+        let mut v: Vec<String> = items.into_iter().map(|i| i.description).collect();
+        v.sort();
+        v
+    };
+
+    // Multi-category: OR semantics (comma-separated).
+    let mut q = base_query();
+    q.category_ids = Some(format!("{cat_a},{cat_b}"));
+    let got = names(list_items(&pool, &q).await.unwrap());
+    assert_eq!(got, vec!["em A", "em B"]);
+
+    // Multi-tag: OR semantics (item carries any of the tags).
+    let mut q = base_query();
+    q.tags = Some("x".to_string());
+    assert_eq!(names(list_items(&pool, &q).await.unwrap()), vec!["em A", "em C"]);
+    let mut q = base_query();
+    q.tags = Some("x,y".to_string());
+    assert_eq!(names(list_items(&pool, &q).await.unwrap()), vec!["em A", "em B", "em C"]);
+
+    // Combined + summary honors them.
+    let mut q = base_query();
+    q.category_ids = Some(cat_c.to_string());
+    q.tags = Some("x".to_string());
+    let s = summary(&pool, &q).await.unwrap();
+    assert_eq!(s.count, 1);
+    assert_eq!(s.total_cents, -300);
+}
+
+#[sqlx::test]
+async fn none_sentinel_filters_uncategorized_and_untagged(pool: PgPool) {
+    common::migrate(&pool).await;
+    let cat_a: sqlx::types::Uuid =
+        sqlx::query_scalar("INSERT INTO categories (name) VALUES ('Com Alimentação (teste)') RETURNING id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, category_id, tags)
+         VALUES ('manual', 'expense', 'confirmed', '2026-07-01', 'com categoria', -100, $1, '{x}'),
+                ('manual', 'expense', 'confirmed', '2026-07-01', 'sem categoria', -200, NULL, '{y}'),
+                ('manual', 'expense', 'confirmed', '2026-07-01', 'sem tags', -300, $1, '{}')",
+    )
+    .bind(cat_a)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let names = |items: Vec<deepsave_backend::models::Item>| {
+        let mut v: Vec<String> = items.into_iter().map(|i| i.description).collect();
+        v.sort();
+        v
+    };
+
+    // "__none" alone → only uncategorized.
+    let mut q = base_query();
+    q.category_ids = Some("__none".to_string());
+    assert_eq!(
+        names(list_items(&pool, &q).await.unwrap()),
+        vec!["sem categoria"]
+    );
+
+    // "__none" + a real id → uncategorized OR that category.
+    let mut q = base_query();
+    q.category_ids = Some(format!("__none,{cat_a}"));
+    assert_eq!(
+        names(list_items(&pool, &q).await.unwrap()),
+        vec!["com categoria", "sem categoria", "sem tags"]
+    );
+
+    // Tags "__none" → only items without tags.
+    let mut q = base_query();
+    q.tags = Some("__none".to_string());
+    assert_eq!(names(list_items(&pool, &q).await.unwrap()), vec!["sem tags"]);
+
+    // Tags "__none,y" → untagged OR carrying tag y.
+    let mut q = base_query();
+    q.tags = Some("__none,y".to_string());
+    assert_eq!(
+        names(list_items(&pool, &q).await.unwrap()),
+        vec!["sem categoria", "sem tags"]
+    );
+
+    // Summary honors it too.
+    let mut q = base_query();
+    q.category_ids = Some("__none".to_string());
+    let s = summary(&pool, &q).await.unwrap();
+    assert_eq!(s.count, 1);
+    assert_eq!(s.total_cents, -200);
 }

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { aiTagsApi, categoriesApi, itemsApi, matchesApi, memoryApi, tagsApi } from '../api/client'
 import type { Item, SuggestionDetail } from '../lib/types'
@@ -16,8 +17,6 @@ const KIND_LABELS: Record<string, string> = {
   expense: 'Despesa',
   income: 'Receita',
   refund: 'Estorno',
-  card_payment: 'Pagamento de fatura',
-  investment: 'Investimento',
   internal: 'Interna',
 }
 
@@ -119,6 +118,7 @@ function SuggestionRow({
 
 export default function Review() {
   const qc = useQueryClient()
+  const nav = useNavigate()
   const [editing, setEditing] = useState<Item | null>(null)
   const [itemsOpen, setItemsOpen] = useState(true)
   const [linksOpen, setLinksOpen] = useState(true)
@@ -185,7 +185,6 @@ export default function Review() {
   const rejectItem = useMutation({ mutationFn: itemsApi.reject, onSuccess: invalidate })
   const acceptSuggestion = useMutation({ mutationFn: itemsApi.acceptSuggestion, onSuccess: invalidate })
   const applyMemory = useMutation({ mutationFn: itemsApi.applyMemory, onSuccess: invalidate })
-  const applyAllMemory = useMutation({ mutationFn: memoryApi.applyAll, onSuccess: invalidate })
   const acceptMatch = useMutation({ mutationFn: matchesApi.accept, onSuccess: invalidate })
   const rejectMatch = useMutation({ mutationFn: matchesApi.reject, onSuccess: invalidate })
   const suggest = useMutation({ mutationFn: matchesApi.suggest, onSuccess: invalidate })
@@ -251,7 +250,8 @@ export default function Review() {
                           )}
                           {mem && (
                             <span className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400">
-                              Usual: {mem.category_name}
+                              Usual: {mem.category_name ?? '—'}
+                              {mem.tags.length > 0 && ` [${mem.tags.join(', ')}]`}
                               <button
                                 onClick={() => applyMemory.mutate(it.id)}
                                 className="rounded bg-zinc-700 px-1 text-[10px] text-zinc-100 hover:bg-zinc-600"
@@ -259,8 +259,8 @@ export default function Review() {
                                 aplicar
                               </button>
                               <button
-                                onClick={() => it.merchant && applyAllMemory.mutate(it.merchant)}
-                                title="Aplicar a categoria a todos os itens deste comerciante"
+                                onClick={() => it.merchant && nav(`/memory?apply=${encodeURIComponent(it.merchant)}`)}
+                                title="Ver todos os itens deste comerciante e escolher quais aplicar"
                                 className="rounded bg-zinc-700 px-1 text-[10px] text-zinc-100 hover:bg-zinc-600"
                               >
                                 todos
@@ -273,7 +273,7 @@ export default function Review() {
                     <span className="ml-auto whitespace-nowrap text-sm tabular-nums">
                       {it.kind === 'income'
                         ? '+'
-                        : it.kind === 'card_payment' || it.kind === 'investment' || it.kind === 'internal'
+                        : it.kind === 'internal'
                           ? ''
                           : '−'}
                       {fmtCents(it.amount_cents)}

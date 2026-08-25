@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::models::AiTagBatch;
 use crate::services::ai::AiClient;
+use crate::services::memory;
 use crate::services::tags;
 
 /// Maximum items per batch — bounds the prompt size for a single AI call.
@@ -281,7 +282,7 @@ Regras:
 - Tags são SITUACIONAIS (o contexto do gasto), não a categoria. Se o item já tem tags, você pode mantê-las ou refiná-las.
 - Prefira tags da lista "all_tags"; crie uma nova apenas se nenhuma existente encaixar bem.
 - "ex" traz exemplos reais de itens já taggeados do mesmo comerciante — use-os como referência de estilo.
-- Itens sem informação suficiente ou que claramente não merecem tag devem ser OMITIDOS da resposta (não inclua o índice)."#
+- Itens sem informação suficiente: MESMO ASSIM sugira tags — faça a melhor estimativa com os dados disponíveis (descrição, comerciante, valor, data, categoria). Ex.: comerciante genérico de e-commerce → "compras". Só omita um item da resposta se absolutamente nenhuma tag fizer sentido (não inclua o índice)."#
         .to_string()
 }
 
@@ -318,6 +319,19 @@ pub async fn apply_suggestion(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+
+    // Feed merchant memory (tags accumulate) so future extractions/items learn them.
+    let row: Option<(Option<String>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT merchant, category_id FROM items WHERE id = $1",
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((Some(merchant), category_id)) = row {
+        if let Err(e) = memory::record_confirmation(pool, &merchant, category_id, &tags).await {
+            error!("failed to record memory for merchant {merchant}: {e:#}");
+        }
+    }
 
     Ok(json!({ "ok": true, "item_id": item_id, "tags": tags }))
 }

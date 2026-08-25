@@ -4,6 +4,13 @@ import { categoriesApi, itemsApi, tagsApi, type ItemInput } from '../api/client'
 import type { Item } from '../lib/types'
 import { fmtCents } from '../lib/format'
 
+const KIND_OPTIONS: [string, string][] = [
+  ['expense', 'Despesa'],
+  ['income', 'Receita'],
+  ['refund', 'Estorno'],
+  ['internal', 'Interna'],
+]
+
 interface Props {
   month: string
   parent?: Item | null
@@ -33,6 +40,7 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
   const [categoryId, setCategoryId] = useState(editing?.category_id ?? '')
   const [tags, setTags] = useState<string[]>(editing?.tags ?? [])
   const [tagInput, setTagInput] = useState('')
+  const [updateMemory, setUpdateMemory] = useState(true)
   const [busy, setBusy] = useState(false)
 
   const addTag = () => {
@@ -49,10 +57,10 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
 
     let input: ItemInput
     if (editing) {
-      // Only category + tags are editable on an existing item.
+      // Category, tags and kind are editable on an existing item; the rest is fixed.
       input = {
         parent_id: editing.parent_id,
-        kind: editing.kind,
+        kind,
         account_id: editing.account_id,
         installment: editing.installment,
         installment_count: editing.installment_count,
@@ -63,6 +71,7 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
         currency: editing.currency,
         category_id: categoryId || null,
         tags,
+        update_memory: updateMemory,
       }
     } else {
       const parsed = parseFloat(amount.replace(',', '.'))
@@ -108,7 +117,7 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
       >
         <h2 className="font-semibold">
           {isEditing
-            ? 'Categorias e tags'
+            ? 'Editar item'
             : parent
               ? `Sub-item de “${parent.description}”`
               : 'Novo item'}
@@ -123,6 +132,18 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
                 {editing!.merchant ? ` · ${editing!.merchant}` : ''}
               </p>
             </div>
+
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+              className="field"
+            >
+              {KIND_OPTIONS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
 
             <select
               value={categoryId}
@@ -173,6 +194,17 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
                 ))}
               </datalist>
             </div>
+
+            <label className="flex items-center gap-2 text-xs text-zinc-400">
+              <input
+                type="checkbox"
+                checked={updateMemory}
+                onChange={(e) => setUpdateMemory(e.target.checked)}
+                disabled={!editing!.merchant}
+                className="checkbox"
+              />
+              Salvar na memória (categoria + tags deste comerciante)
+            </label>
           </>
         ) : (
           <>
@@ -210,6 +242,7 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
               >
                 <option value="expense">Despesa</option>
                 <option value="income">Receita</option>
+                <option value="refund">Estorno</option>
                 <option value="internal">Interna</option>
               </select>
               <input

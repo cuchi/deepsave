@@ -17,14 +17,7 @@ pub(crate) const ITEM_COLS: &str = "id, parent_id, document_id, source, kind, st
      match_confidence, created_at, updated_at";
 
 /// Kinds a bulk edit may assign (must match what the app/parsers produce).
-const BULK_KINDS: [&str; 6] = [
-    "expense",
-    "income",
-    "refund",
-    "card_payment",
-    "investment",
-    "internal",
-];
+const BULK_KINDS: [&str; 4] = ["expense", "income", "refund", "internal"];
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -34,10 +27,11 @@ pub struct ListQuery {
     pub status: Option<String>,
     /// Free-text search across description, merchant and tags.
     pub search: Option<String>,
-    pub category_id: Option<Uuid>,
+    /// Comma-separated category ids (OR: item in any of them). Empty = no filter.
+    pub category_ids: Option<String>,
     pub kind: Option<String>,
-    /// Filter by an exact tag.
-    pub tag: Option<String>,
+    /// Comma-separated tags (OR: item carries any of them). Empty = no filter.
+    pub tags: Option<String>,
     /// Filter by bank ('nubank' | 'c6' | 'caixa').
     pub bank: Option<String>,
     /// 'date' (default) or 'value'.
@@ -87,7 +81,7 @@ fn month_range(month: Option<&str>) -> Result<(Option<NaiveDate>, Option<NaiveDa
 
 /// Shared WHERE fragment for the items list and the filtered summary.
 /// Parameters $1..$11 (bind order: month start, month end, status, search,
-/// category_id, kind, tag, bank, installments, date_from, date_to).
+/// category_ids, kind, tags, bank, installments, date_from, date_to).
 const ITEM_FILTERS: &str = "
     ($1::date IS NULL OR occurred_on >= $1)
     AND ($2::date IS NULL OR occurred_on < $2)
@@ -96,9 +90,13 @@ const ITEM_FILTERS: &str = "
          OR description ILIKE '%' || $4 || '%'
          OR COALESCE(merchant, '') ILIKE '%' || $4 || '%'
          OR array_to_string(tags, ' ') ILIKE '%' || $4 || '%')
-    AND ($5::uuid IS NULL OR category_id = $5)
+    AND (cardinality($5) = 0
+         OR category_id::text = ANY($5)
+         OR ('__none' = ANY($5) AND category_id IS NULL))
     AND ($6::text IS NULL OR kind = $6)
-    AND ($7::text IS NULL OR $7 = ANY(tags))
+    AND (cardinality($7) = 0
+         OR tags && $7
+         OR ('__none' = ANY($7) AND cardinality(tags) = 0))
     AND ($8::text IS NULL OR EXISTS (
           SELECT 1 FROM documents d
           JOIN sources s ON s.id = d.source_id
@@ -110,10 +108,29 @@ const ITEM_FILTERS: &str = "
     AND ($10::date IS NULL OR occurred_on >= $10)
     AND ($11::date IS NULL OR occurred_on <= $11)";
 
+/// Parse a comma-separated filter list (category ids or tags). Values are kept
+/// as text so the special `__none` sentinel ("no category"/"no tags") can live
+/// in the same array; the SQL compares via `category_id::text` / `tags &&`.
+pub(crate) fn split_filters(s: &Option<String>) -> Vec<String> {
+    s.as_deref()
+        .map(|v| {
+            v.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Sentinel value meaning "no category" / "no tags" in the filter params.
+pub(crate) const NO_FILTER: &str = "__none";
+
 /// Core list query, kept separate from the handler so integration tests can
 /// drive it without an `AppState` (mirrors `bulk_update_items`).
 pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppError> {
     let (start, end) = month_range(q.month.as_deref())?;
+    let category_ids = split_filters(&q.category_ids);
+    let tags = split_filters(&q.tags);
     let items = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLS} FROM items
          WHERE {ITEM_FILTERS}
@@ -126,9 +143,9 @@ pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppEr
     .bind(end)
     .bind(&q.status)
     .bind(&q.search)
-    .bind(q.category_id)
+    .bind(&category_ids)
     .bind(&q.kind)
-    .bind(&q.tag)
+    .bind(&tags)
     .bind(&q.bank)
     .bind(&q.installments)
     .bind(q.date_from)
@@ -145,6 +162,8 @@ pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppEr
 /// allocations of their parent and would double-count. Ignores `sort`/`limit`.
 pub async fn summary(pool: &PgPool, q: &ListQuery) -> Result<ItemSummary, AppError> {
     let (start, end) = month_range(q.month.as_deref())?;
+    let category_ids = split_filters(&q.category_ids);
+    let tags = split_filters(&q.tags);
     let row = sqlx::query_as::<_, ItemSummary>(sqlx::AssertSqlSafe(format!(
         "SELECT count(*)::bigint AS count,
                 COALESCE(SUM(amount_cents), 0)::bigint AS total_cents
@@ -155,9 +174,9 @@ pub async fn summary(pool: &PgPool, q: &ListQuery) -> Result<ItemSummary, AppErr
     .bind(end)
     .bind(&q.status)
     .bind(&q.search)
-    .bind(q.category_id)
+    .bind(&category_ids)
     .bind(&q.kind)
-    .bind(&q.tag)
+    .bind(&tags)
     .bind(&q.bank)
     .bind(&q.installments)
     .bind(q.date_from)
@@ -270,6 +289,11 @@ pub async fn bulk_update_items(
     // category is actually being changed. `category_id` here is Copy, so it is
     // still available after the match above.
     if input.update_memory && category_changed {
+        // Record the tags being (re)applied too — but never tags being removed.
+        let mem_tags: Vec<String> = match (&tags, tags_mode) {
+            (Some(t), TagsMode::Add | TagsMode::Replace) => t.clone(),
+            _ => Vec::new(),
+        };
         let merchants: Vec<String> = sqlx::query_scalar(
             "SELECT DISTINCT merchant FROM items WHERE id = ANY($1) AND merchant IS NOT NULL",
         )
@@ -277,7 +301,7 @@ pub async fn bulk_update_items(
         .fetch_all(pool)
         .await?;
         for m in &merchants {
-            memory::record_confirmation(pool, m, input.category_id.flatten()).await?;
+            memory::record_confirmation(pool, m, input.category_id.flatten(), &mem_tags).await?;
         }
     }
 
@@ -316,6 +340,9 @@ pub async fn create(
     State(state): State<AppState>,
     Json(input): Json<ItemInput>,
 ) -> Result<Json<Item>, AppError> {
+    if !BULK_KINDS.contains(&input.kind.as_str()) {
+        return Err(AppError::bad_request("invalid kind"));
+    }
     let item = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
         "INSERT INTO items
            (parent_id, kind, account_id, installment, installment_count, occurred_on,
@@ -345,6 +372,9 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(input): Json<ItemInput>,
 ) -> Result<Json<Item>, AppError> {
+    if !BULK_KINDS.contains(&input.kind.as_str()) {
+        return Err(AppError::bad_request("invalid kind"));
+    }
     let item = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
         "UPDATE items
          SET parent_id = $1, kind = $2, account_id = $3, installment = $4,
@@ -371,9 +401,12 @@ pub async fn update(
     .await?
     .ok_or_else(|| AppError::not_found("item not found"))?;
 
-    // A manual edit is a correction: feed the categorization memory.
-    if let Some(m) = input.merchant.as_deref() {
-        memory::record_confirmation(&state.pool, m, input.category_id).await?;
+    // A manual edit is a correction: feed the categorization memory (category + tags),
+    // unless the user opted out (structural/seasonal edits).
+    if input.update_memory {
+        if let Some(m) = input.merchant.as_deref() {
+            memory::record_confirmation(&state.pool, m, input.category_id, &input.tags).await?;
+        }
     }
 
     Ok(Json(item))
@@ -399,12 +432,12 @@ pub async fn confirm(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let row: Option<(Option<Uuid>, Option<String>, Option<Uuid>)> =
-        sqlx::query_as("SELECT document_id, merchant, category_id FROM items WHERE id = $1")
+    let row: Option<(Option<Uuid>, Option<String>, Option<Uuid>, Vec<String>)> =
+        sqlx::query_as("SELECT document_id, merchant, category_id, tags FROM items WHERE id = $1")
             .bind(id)
             .fetch_optional(&state.pool)
             .await?;
-    let Some((document_id, merchant, category_id)) = row else {
+    let Some((document_id, merchant, category_id, item_tags)) = row else {
         return Err(AppError::not_found("item not found"));
     };
 
@@ -413,9 +446,9 @@ pub async fn confirm(
         .execute(&state.pool)
         .await?;
 
-    // Strengthen the categorization memory on confirmation.
+    // Strengthen the categorization memory on confirmation (tags accumulate).
     if let Some(m) = &merchant {
-        memory::record_confirmation(&state.pool, m, category_id).await?;
+        memory::record_confirmation(&state.pool, m, category_id, &item_tags).await?;
     }
     if let Some(document_id) = document_id {
         finalize_document_if_done(&state.pool, document_id).await?;
@@ -433,8 +466,8 @@ pub async fn reject(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Apply the remembered category for this item's merchant (one-click).
-/// Tags are situational and are NOT applied from memory.
+/// Apply the remembered category + tags for this item's merchant (one-click).
+/// Category replaces; tags are added (union) — situational tags stay.
 pub async fn apply_memory(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -449,20 +482,35 @@ pub async fn apply_memory(
     };
 
     let normalized = tags::strip_accents(merchant.trim()).to_lowercase();
-    let mem: Option<(Option<Uuid>,)> = sqlx::query_as(
-        "SELECT category_id FROM merchant_memory WHERE merchant = $1",
+    let mem: Option<(Option<Uuid>, Vec<String>)> = sqlx::query_as(
+        "SELECT category_id, tags FROM merchant_memory WHERE merchant = $1",
     )
     .bind(&normalized)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((Some(category_id),)) = mem else {
-        return Err(AppError::not_found("no categorization memory for this merchant"));
+    let Some((category_id, mem_tags)) = mem else {
+        return Err(AppError::not_found("no memory for this merchant"));
     };
+    if category_id.is_none() && mem_tags.is_empty() {
+        return Err(AppError::not_found("no memory for this merchant"));
+    }
 
+    // Apply the remembered category (replace) + tags (add/union) to this item.
     let item = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
-        "UPDATE items SET category_id = $1, updated_at = now() WHERE id = $2 RETURNING {ITEM_COLS}"
+        "UPDATE items SET
+           category_id = COALESCE($1, category_id),
+           tags = COALESCE(
+             (SELECT array_agg(t ORDER BY ord)
+              FROM (SELECT t, min(ord) AS ord
+                    FROM unnest(items.tags || $2) WITH ORDINALITY AS u(t, ord)
+                    GROUP BY t) s),
+             '{{}}'::text[]),
+           updated_at = now()
+         WHERE id = $3
+         RETURNING {ITEM_COLS}"
     )))
     .bind(category_id)
+    .bind(&mem_tags)
     .bind(id)
     .fetch_one(&state.pool)
     .await?;

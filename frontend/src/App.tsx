@@ -4,13 +4,11 @@ import { authApi } from './api/client'
 import Login from './pages/Login'
 import Charts from './pages/Charts'
 import Lista from './pages/Lista'
-import Categories from './pages/Categories'
 import Upload from './pages/Upload'
 import Review from './pages/Review'
 import Coverage from './pages/Coverage'
 import Memory from './pages/Memory'
 import Recurring from './pages/Recurring'
-import Tags from './pages/Tags'
 import Layout from './components/Layout'
 
 export default function App() {
@@ -39,13 +37,13 @@ export default function App() {
       <Route element={authed ? <Layout /> : <Navigate to="/login" replace />}>
         <Route path="/" element={<Charts />} />
         <Route path="/lista" element={<Lista />} />
-        <Route path="/categories" element={<Categories />} />
+        <Route path="/categories" element={<Navigate to="/memory" replace />} />
         <Route path="/upload" element={<Upload />} />
         <Route path="/review" element={<Review />} />
         <Route path="/coverage" element={<Coverage />} />
         <Route path="/memory" element={<Memory />} />
         <Route path="/recurring" element={<Recurring />} />
-        <Route path="/tags" element={<Tags />} />
+        <Route path="/tags" element={<Navigate to="/memory" replace />} />
       </Route>
       <Route path="*" element={<Navigate to={authed ? '/' : '/login'} replace />} />
     </Routes>

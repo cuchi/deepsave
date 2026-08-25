@@ -41,12 +41,6 @@ export default function Layout() {
             <Link to="/recurring" className="hover:text-zinc-100">
               Recorrentes
             </Link>
-            <Link to="/categories" className="hover:text-zinc-100">
-              Categorias
-            </Link>
-            <Link to="/tags" className="hover:text-zinc-100">
-              Tags
-            </Link>
           </nav>
         </div>
         <button

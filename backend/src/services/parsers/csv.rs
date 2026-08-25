@@ -108,7 +108,7 @@ fn parse_nubank_account(content: &str, delimiter: u8) -> Result<Vec<ParsedItem>>
             || lower.contains("pagamento cartão")
             || lower.contains("pagamento cartao")
         {
-            "card_payment"
+            "internal"
         } else if lower.contains("pagamento recebido") {
             "income"
         } else if negative {
@@ -193,11 +193,11 @@ fn parse_c6_invoice(
         };
 
         // Negative Valor(em R$) is a credit on the card: a refund/reversal
-        // (or a payment included in the bill, which is neutral).
+        // (or a payment included in the bill, which is neutral → internal).
         let (amount_cents, kind) = if negative {
             let dl = description.to_lowercase();
             if dl.contains("inclusao de pagamento") || dl.contains("pagamento fatura") {
-                (-cents, "card_payment")
+                (-cents, "internal")
             } else {
                 (cents, "refund")
             }
@@ -310,16 +310,14 @@ fn classify_c6_bank(hay: &str, entrada: i64, saida: i64) -> (String, i64) {
     let kind = if hay.contains("pgto fat cartao")
         || hay.contains("fatura de cartão")
         || hay.contains("fatura de cartao")
-    {
-        "card_payment"
-    } else if hay.contains("debito de cartao") || hay.contains("débito de cartão") {
-        "expense"
-    } else if hay.contains("resgate de cdb")
+        || hay.contains("resgate de cdb")
         || hay.contains("emissao de cdb")
         || hay.contains("emissão de cdb")
         || hay.contains("ir res fundos")
     {
-        "investment"
+        "internal"
+    } else if hay.contains("debito de cartao") || hay.contains("débito de cartão") {
+        "expense"
     } else if saida > 0 {
         "expense"
     } else {

@@ -28,13 +28,13 @@ fn c6_installments_use_billing_month() {
 }
 
 #[test]
-fn nubank_card_payment_detected() {
+fn nubank_card_payment_is_internal() {
     let content = "Data,Valor,Identificador,Descrição\n\
 15/08/2026,-31620.43,uuid,Pagamento Fatura QR CODE\n\
 16/08/2026,-45.90,uuid,Coffee Shop\n";
     let items = csv::parse_csv(content, None).unwrap();
     let card = items.iter().find(|i| i.description.contains("Pagamento Fatura")).unwrap();
-    assert_eq!(card.kind, "card_payment");
+    assert_eq!(card.kind, "internal");
     let shop = items.iter().find(|i| i.description.contains("Coffee")).unwrap();
     assert_eq!(shop.kind, "expense");
 }
@@ -52,10 +52,10 @@ Data Lançamento,Data Contábil,Título,Descrição,Entrada(R$),Saída(R$),Saldo
     assert_eq!(items.len(), 5);
 
     let find = |needle: &str| items.iter().find(|i| i.description.to_lowercase().contains(needle)).unwrap();
-    assert_eq!(find("ir res fundos").kind, "investment");
+    assert_eq!(find("ir res fundos").kind, "internal");
     assert_eq!(find("pix enviado").kind, "expense");
-    assert_eq!(find("resgate de cdb").kind, "investment");
-    assert_eq!(find("pgto fat cartao").kind, "card_payment");
+    assert_eq!(find("resgate de cdb").kind, "internal");
+    assert_eq!(find("pgto fat cartao").kind, "internal");
     let debit = find("debito de cartao");
     assert_eq!(debit.kind, "expense");
     assert_eq!(debit.merchant.as_deref(), Some("Coffee Shop Downtown"));
@@ -76,7 +76,7 @@ fn nubank_account_fixture_parses() {
     assert!(items.iter().any(|i| i.kind == "expense"));
     assert!(items.iter().any(|i| i.kind == "income"));
     assert!(items.iter().any(|i| i.kind == "refund"));
-    assert!(items.iter().any(|i| i.kind == "card_payment"));
+    assert!(items.iter().any(|i| i.kind == "internal"));
 
     let sent = items.iter().find(|i| i.description.contains("Person A")).unwrap();
     assert_eq!(sent.kind, "expense");
@@ -113,7 +113,7 @@ fn c6_card_fixture_parses() {
 }
 
 #[test]
-fn c6_negative_amount_is_refund_or_card_payment() {
+fn c6_negative_amount_is_refund_or_internal() {
     let content = "Data de Compra;Nome;Final;Categoria;Descrição;Parcela;USD;Cotação;R$\n\
 04/07/2026;X;1;-;Anuidade Diferenciada;Única;0;0;98.00\n\
 04/07/2026;X;1;-;Estorno Tarifa;Única;0;0;-98.00\n\
@@ -130,10 +130,10 @@ fn c6_negative_amount_is_refund_or_card_payment() {
     assert_eq!(estorno.kind, "refund");
 
     let pagamento = items.iter().find(|i| i.description == "Inclusao de Pagamento").unwrap();
-    assert_eq!(pagamento.kind, "card_payment");
+    assert_eq!(pagamento.kind, "internal");
 
     let fatura = items.iter().find(|i| i.description == "Pagamento Fatura QR CODE").unwrap();
-    assert_eq!(fatura.kind, "card_payment");
+    assert_eq!(fatura.kind, "internal");
     assert_eq!(fatura.amount_cents, -3162043);
 }
 
@@ -154,8 +154,7 @@ fn tags_are_normalized() {
 fn c6_bank_fixture_parses() {
     let items = csv::parse_csv(&read_fixture("c6_bank.csv"), None).unwrap();
     assert_eq!(items.len(), 5);
-    assert!(items.iter().any(|i| i.kind == "investment"));
-    assert!(items.iter().any(|i| i.kind == "card_payment"));
+    assert!(items.iter().any(|i| i.kind == "internal"));
     assert!(items.iter().any(|i| i.kind == "expense"));
 }
 

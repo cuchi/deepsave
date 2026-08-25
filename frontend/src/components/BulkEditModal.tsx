@@ -19,8 +19,6 @@ const KIND_OPTIONS: [string, string][] = [
   ['expense', 'Despesa'],
   ['income', 'Receita'],
   ['refund', 'Estorno'],
-  ['card_payment', 'Fatura'],
-  ['investment', 'Investimento'],
   ['internal', 'Interna'],
 ]
 

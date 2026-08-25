@@ -105,7 +105,7 @@ pub async fn run() -> anyhow::Result<()> {
     {
         let pool = pool.clone();
         tokio::spawn(async move {
-            let _ = services::ingest::reclassify_card_payments(&pool).await;
+            let _ = services::ingest::reclassify_pix_as_internal(&pool).await;
         });
     }
 
@@ -165,8 +165,8 @@ pub async fn run() -> anyhow::Result<()> {
             "/memory/{id}",
             patch(routes::memory::update_memory).delete(routes::memory::delete_memory),
         )
-        .route("/memory/apply-all", post(routes::memory::apply_all))
-        .route("/memory/apply-all-global", post(routes::memory::apply_all_global))
+        .route("/memory/preview", post(routes::memory::preview))
+        .route("/memory/apply", post(routes::memory::apply))
         .route(
             "/recurring",
             get(routes::recurring::list).post(routes::recurring::create),
@@ -195,6 +195,8 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/matches/{id}/reject", post(routes::matches::reject))
         .route("/dashboard", get(routes::dashboard::dashboard))
         .route("/dashboard/trend", get(routes::dashboard::trend))
+        .route("/dashboard/daily", get(routes::dashboard::daily))
+        .route("/dashboard/tags", get(routes::dashboard::tags))
         .route("/sources", get(routes::sources::list))
         .route("/sources/{id}", patch(routes::sources::update))
         .route("/coverage", get(routes::sources::coverage))

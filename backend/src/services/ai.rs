@@ -249,8 +249,8 @@ pub async fn build_extraction_system_prompt(pool: &PgPool) -> Result<String> {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let memory: Vec<(String, String)> = sqlx::query_as(
-        "SELECT m.merchant, COALESCE(c.name, '')
+    let memory: Vec<(String, String, Vec<String>)> = sqlx::query_as(
+        "SELECT m.merchant, COALESCE(c.name, ''), m.tags
          FROM merchant_memory m
          LEFT JOIN categories c ON c.id = m.category_id
          WHERE m.confirm_count >= 2
@@ -261,8 +261,14 @@ pub async fn build_extraction_system_prompt(pool: &PgPool) -> Result<String> {
     .await?;
     let mem_lines = memory
         .iter()
-        .filter(|(_, c)| !c.is_empty())
-        .map(|(m, c)| format!("- {m} → {c}"))
+        .filter(|(_, c, t)| !c.is_empty() || !t.is_empty())
+        .map(|(m, c, t)| {
+            if t.is_empty() {
+                format!("- {m} → {c}")
+            } else {
+                format!("- {m} → {c} [{}]", t.join(", "))
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -282,7 +288,7 @@ Esquema JSON exato:
       "amount_cents": integer,
       "category": string | null,
       "tags": [string],
-      "kind": "expense" | "income" | "refund" | "card_payment" | "investment" | "internal",
+      "kind": "expense" | "income" | "refund" | "internal",
       "installment": integer | null,
       "installment_count": integer | null,
       "date": "YYYY-MM-DD" | null
@@ -293,9 +299,7 @@ Esquema JSON exato:
 Regras:
 - amount_cents é um inteiro em centavos. NEGATIVO = despesa/saída. Positivo = receita/entrada.
 - "kind" padrão é "expense". Use "income" para receitas (inclui Pix/TED recebidos), "refund" para estornos.
-- Use "card_payment" para pagamentos da fatura do cartão de crédito (ex: "Pagamento Fatura"). Eles NÃO são despesas — a despesa real já está nas transações do cartão.
-- Use "investment" para investimentos (ex: emissão/resgate de CDB, impostos de fundos). Eles são rastreados mas NÃO entram nos cálculos de gasto/receita.
-- Use "internal" para transferências entre contas do próprio usuário (ex: transferência da conta Nubank para a conta C6, Pix entre contas dele). Elas NÃO contam como despesa/receita.
+- Use "internal" para pagamentos da fatura do cartão de crédito (ex: "Pagamento Fatura"), investimentos (ex: emissão/resgate de CDB, impostos de fundos) e transferências entre contas do próprio usuário (ex: transferência da conta Nubank para a conta C6, Pix entre contas dele). Eles são rastreados mas NÃO contam como despesa/receita.
 - Ignore cabeçalhos, saldos e linhas de total. Extraia apenas itens individuais de gasto/receita.
 - Para parcelas (ex: 7/10), preencha installment=7 e installment_count=10.
 - "date" de cada item é a data da transação; se o documento tiver uma data única, pode repeti-la.

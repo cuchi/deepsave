@@ -55,8 +55,7 @@ async fn csv_ingestion_creates_confirmed_items(pool: PgPool) {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert!(kinds.iter().any(|k| k == "investment"));
-    assert!(kinds.iter().any(|k| k == "card_payment"));
+    assert!(kinds.iter().any(|k| k == "internal"));
     assert!(kinds.iter().any(|k| k == "expense"));
     // Structured CSV never calls the AI.
     assert_eq!(ai_calls_count(&pool, doc.id).await, 0);

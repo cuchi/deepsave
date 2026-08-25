@@ -49,6 +49,9 @@ fn default_kind() -> String {
 fn default_currency() -> String {
     "BRL".to_string()
 }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Item {
@@ -98,6 +101,11 @@ pub struct ItemInput {
     pub category_id: Option<Uuid>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Opt-out: feed the categorization memory (category + tags) on this edit.
+    /// A single edit is a correction, so this defaults to **on**; uncheck for
+    /// structural/seasonal edits. (Bulk edits default to off — see `BulkItemUpdate`.)
+    #[serde(default = "default_true")]
+    pub update_memory: bool,
 }
 
 /// Filtered summary for the items list (`GET /api/items/summary`).
@@ -229,6 +237,8 @@ pub struct MemoryEntry {
     pub merchant: String,
     pub category_id: Option<Uuid>,
     pub category_name: Option<String>,
+    /// Tags remembered for this merchant (accumulated over confirmations).
+    pub tags: Vec<String>,
     pub confidence: f32,
     pub confirm_count: i32,
     pub last_confirmed_at: Option<DateTime<Utc>>,

@@ -2,20 +2,19 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::models::MemoryEntry;
-use crate::services::tags;
+use crate::services::{memory, tags};
 use crate::AppState;
 
 const MEMORY_COLS: &str = "m.id, m.merchant, m.category_id, c.name AS category_name, \
-     m.confidence, m.confirm_count, m.last_confirmed_at";
+     m.tags, m.confidence, m.confirm_count, m.last_confirmed_at";
 
 // For INSERT/UPDATE RETURNING (no `categories` join available).
 const MEMORY_RETURNING: &str = "id, merchant, category_id, NULL::text AS category_name, \
-     confidence, confirm_count, last_confirmed_at";
+     tags, confidence, confirm_count, last_confirmed_at";
 
 pub async fn list_memory(
     State(state): State<AppState>,
@@ -35,6 +34,8 @@ pub async fn list_memory(
 pub struct MemoryInput {
     pub merchant: String,
     pub category_id: Option<Uuid>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 pub async fn create_memory(
@@ -45,17 +46,20 @@ pub async fn create_memory(
     if merchant.is_empty() {
         return Err(AppError::bad_request("merchant is empty"));
     }
+    let tags = tags::normalize(&input.tags);
 
     let entry = sqlx::query_as::<_, MemoryEntry>(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO merchant_memory (merchant, category_id, confidence, confirm_count)
-         VALUES ($1, $2, 0.5, 0)
+        "INSERT INTO merchant_memory (merchant, category_id, tags, confidence, confirm_count)
+         VALUES ($1, $2, $3, 0.5, 0)
          ON CONFLICT (merchant) DO UPDATE SET
            category_id = EXCLUDED.category_id,
+           tags = EXCLUDED.tags,
            updated_at = now()
          RETURNING {MEMORY_RETURNING}"
     )))
     .bind(&merchant)
     .bind(input.category_id)
+    .bind(&tags)
     .fetch_one(&state.pool)
     .await?;
     Ok(Json(entry))
@@ -64,6 +68,9 @@ pub async fn create_memory(
 #[derive(Debug, Deserialize)]
 pub struct MemoryUpdate {
     pub category_id: Option<Uuid>,
+    /// `Some` replaces the remembered tags; `None` keeps them.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 pub async fn update_memory(
@@ -71,12 +78,16 @@ pub async fn update_memory(
     Path(id): Path<Uuid>,
     Json(input): Json<MemoryUpdate>,
 ) -> Result<Json<MemoryEntry>, AppError> {
+    let tags = input.tags.as_deref().map(tags::normalize);
     let entry = sqlx::query_as::<_, MemoryEntry>(sqlx::AssertSqlSafe(format!(
-        "UPDATE merchant_memory SET category_id = $1, updated_at = now()
-         WHERE id = $2
+        "UPDATE merchant_memory SET category_id = $1,
+           tags = COALESCE($2, merchant_memory.tags),
+           updated_at = now()
+         WHERE id = $3
          RETURNING {MEMORY_RETURNING}"
     )))
     .bind(input.category_id)
+    .bind(tags)
     .bind(id)
     .fetch_optional(&state.pool)
     .await?
@@ -98,71 +109,43 @@ pub async fn delete_memory(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---------------------------------------------------------------------------
+// Preview-before-apply (logic lives in services/memory.rs)
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Deserialize)]
-pub struct ApplyAllRequest {
-    pub merchant: String,
+pub struct PreviewRequest {
+    /// Merchant (normalized later). Absent/null = all merchants with memory.
+    #[serde(default)]
+    pub merchant: Option<String>,
 }
 
-async fn apply_merchant(pool: &PgPool, normalized: &str, category_id: Uuid) -> Result<usize, AppError> {
-    let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT id, merchant FROM items WHERE merchant IS NOT NULL AND category_id IS NULL",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let mut updated = 0;
-    for (id, item_merchant) in rows {
-        if let Some(m) = item_merchant {
-            if tags::strip_accents(m.trim()).to_lowercase() == normalized {
-                sqlx::query(
-                    "UPDATE items SET category_id = $1, updated_at = now() WHERE id = $2",
-                )
-                .bind(category_id)
-                .bind(id)
-                .execute(pool)
-                .await?;
-                updated += 1;
-            }
-        }
-    }
-    Ok(updated)
-}
-
-/// Apply the merchant's remembered category to every *uncategorized* item of
-/// that merchant (any status). Tags are situational and are NOT applied.
-pub async fn apply_all(
+/// `POST /memory/preview` — the items that *would* change if the remembered
+/// category/tags were applied (single merchant or all). The user picks which
+/// ones to apply and sends the ids to `POST /memory/apply`.
+pub async fn preview(
     State(state): State<AppState>,
-    Json(input): Json<ApplyAllRequest>,
+    Json(input): Json<PreviewRequest>,
+) -> Result<Json<Vec<memory::PreviewItem>>, AppError> {
+    let items = memory::preview_candidates(&state.pool, input.merchant.as_deref()).await?;
+    Ok(Json(items))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApplyRequest {
+    /// Optional merchant restriction (validated against the ids).
+    #[serde(default)]
+    pub merchant: Option<String>,
+    /// Item ids to apply memory to (from the preview selection).
+    pub ids: Vec<Uuid>,
+}
+
+/// `POST /memory/apply` — apply the remembered category + tags **only** to the
+/// selected ids. Category replaces/clears (as today); tags are added (union).
+pub async fn apply(
+    State(state): State<AppState>,
+    Json(input): Json<ApplyRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let normalized = tags::strip_accents(input.merchant.trim()).to_lowercase();
-
-    let mem: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT category_id FROM merchant_memory WHERE merchant = $1",
-    )
-    .bind(&normalized)
-    .fetch_optional(&state.pool)
-    .await?;
-    let Some((category_id,)) = mem else {
-        return Err(AppError::not_found("no categorization memory for this merchant"));
-    };
-
-    let updated = apply_merchant(&state.pool, &normalized, category_id).await?;
+    let updated = memory::apply_selected(&state.pool, input.merchant.as_deref(), &input.ids).await?;
     Ok(Json(json!({ "updated": updated })))
-}
-
-/// Apply every memory entry's category to its uncategorized items.
-pub async fn apply_all_global(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let entries: Vec<(String, Uuid)> = sqlx::query_as(
-        "SELECT merchant, category_id FROM merchant_memory WHERE category_id IS NOT NULL",
-    )
-    .fetch_all(&state.pool)
-    .await?;
-
-    let mut total = 0;
-    for (merchant, category_id) in entries {
-        total += apply_merchant(&state.pool, &merchant, category_id).await?;
-    }
-    Ok(Json(json!({ "updated": total })))
 }

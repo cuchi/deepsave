@@ -15,7 +15,7 @@ import { currentMonth, fmtCents } from '../lib/format'
 import ItemForm from '../components/ItemForm'
 import BulkEditModal from '../components/BulkEditModal'
 import BankLogo from '../components/BankLogo'
-import ItemFilters, { emptyFilters, type ItemFiltersValue } from '../components/ItemFilters'
+import ItemFilters, { useFiltersUrl } from '../components/ItemFilters'
 
 /** Global list cap: whole history, most recent first, capped for bulk workflows. */
 const LIST_LIMIT = 500
@@ -29,8 +29,6 @@ interface FormState {
 const KIND_LABELS: Record<string, string> = {
   income: 'Receita',
   refund: 'Estorno',
-  card_payment: 'Fatura',
-  investment: 'Investimento',
   internal: 'Interna',
 }
 
@@ -64,7 +62,7 @@ export default function Lista() {
   const [form, setForm] = useState<FormState>({ open: false })
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkOpen, setBulkOpen] = useState(false)
-  const [filters, setFilters] = useState<ItemFiltersValue>(emptyFilters)
+  const { filters, setFilters } = useFiltersUrl()
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [detailsFor, setDetailsFor] = useState<string | null>(null)
   const [listOpen, setListOpen] = useState(true)
@@ -80,8 +78,8 @@ export default function Lista() {
     queryFn: () =>
       itemsApi.list({
         search: filters.search || undefined,
-        category_id: filters.categoryId || undefined,
-        tag: filters.tagFilter || undefined,
+        category_ids: filters.categoryIds.length ? filters.categoryIds.join(',') : undefined,
+        tags: filters.tagFilter.length ? filters.tagFilter.join(',') : undefined,
         bank: filters.bankFilter || undefined,
         kind: filters.kindFilter || undefined,
         sort: filters.sortBy || undefined,
@@ -101,8 +99,8 @@ export default function Lista() {
     queryFn: () =>
       itemsApi.summary({
         search: filters.search || undefined,
-        category_id: filters.categoryId || undefined,
-        tag: filters.tagFilter || undefined,
+        category_ids: filters.categoryIds.length ? filters.categoryIds.join(',') : undefined,
+        tags: filters.tagFilter.length ? filters.tagFilter.join(',') : undefined,
         bank: filters.bankFilter || undefined,
         kind: filters.kindFilter || undefined,
         installments: filters.installments === 'all' ? undefined : filters.installments,
@@ -157,7 +155,7 @@ export default function Lista() {
     setSelected(new Set())
   }, [
     filters.search,
-    filters.categoryId,
+    filters.categoryIds,
     filters.tagFilter,
     filters.bankFilter,
     filters.kindFilter,

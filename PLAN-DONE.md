@@ -102,6 +102,29 @@ month selector is gone; the date range defaults to the **last complete month**.
 roots-only — receipt children no longer double-count spend). Trend window ends
 at `date_to`'s month (rolling 12 months).
 
+### M15 — Multi-select category & tag filters
+Categorias and Tags filters support **multiple options** (OR semantics: item in
+any selected category / carries any selected tag), on the Lista, the summary and
+the graphs. Backend: `category_ids` / `tags` as comma-separated query params
+(parsed in the shared `ITEM_FILTERS`/`AGG_FILTERS` fragments via
+`cardinality(...) = 0 OR ...`). Frontend: checkbox dropdowns (MultiSelect) replace
+the single selects; URL params carry comma-joined values; one removable chip per
+selected category/tag.
+
+### M17 — ECharts migration + new graphs
+Switched the graphs page from Recharts to **ECharts** (tree-shaken
+`echarts/core` + `CanvasRenderer`; recharts removed) with a modern dark look:
+gradient area lines, donut pie with rounded segments, custom dark tooltips, faint
+dashed grid. Kept the summary cards, pie and 12-month line. **New charts**
+(expenses-only, roots-only, rejected excluded, honoring all filters):
+- **Gastos diários por categoria** — stacked daily bar, top-8 categories + Outros
+- **Calendário de gastos** — GitHub-style heatmap, fixed 12-month window ending
+  at the range's end month (ECharts `calendar` + heatmap + visualMap)
+- **Top tags** — horizontal bars, each tag = full spend carrying it (overlap
+  allowed by design)
+Backend: `GET /api/dashboard/daily?stack_by=category|none` and
+`GET /api/dashboard/tags` (2 new integration tests).
+
 ## Established decisions (as implemented)
 
 - PostgreSQL (SQLite rejected); signed-cookie auth; single `APP_PASSWORD` / `APP_PASSWORD_HASH`.
@@ -116,6 +139,23 @@ at `date_to`'s month (rolling 12 months).
 - CSV items are created **`confirmed`**; AI-extracted items are **`pending_review`**.
 - Transfer legs are excluded from spend totals and paired in a dedicated view.
 - Merchant memory is advisory (few-shot) and only injected after 2 confirmations.
+
+### M16 — Memory overhaul: tags in memory + preview-before-apply + merged page
+
+- `merchant_memory` now records **tags** (accumulate/union, first-occurrence order) alongside the
+  category ("latest wins"); `record_confirmation` (item confirm/update/bulk) and AI tag suggestion
+  apply (`ai_tags::apply_suggestion`) both feed it.
+- `MemoryEntry` + memory API expose `tags` (create/update accept them, update replaces); AI
+  extraction prompt memory lines include `merchant → category [tag1, tag2]` (gated `confirm_count ≥ 2`).
+- Apply semantics: category replaces/clears; **tags are added** (union, never removed); per-item
+  `apply-memory` (Lista/Review button) applies both.
+- **Preview-before-apply**: `POST /memory/preview` lists exactly the items that would change
+  (missing category and/or tags) with current→proposed diff; `POST /memory/apply` touches **only the
+  selected ids** (transactional, idempotent). Blind `apply-all` / `apply-all-global` removed.
+- Memory, Categories and Tags pages merged into a single `/memory` page (tabs); `/categories` and
+  `/tags` redirect to it; nav has one "Memória" entry. "aplicar" (per row) and "Aplicar todas" open
+  an **in-page preview panel** with checkboxes + select-all + "Aplicar selecionados".
+- Tests: `backend/tests/memory.rs` (tag accumulation, preview candidates, apply only touches selection).
 
 ## Resolved decisions (from planning)
 

@@ -16,7 +16,13 @@ import type {
   UpcomingOccurrence,
 } from '../lib/types'
 
-const api = axios.create({ baseURL: '/api', withCredentials: true })
+// `indexes: null` serializes array params as repeated keys (?tags=a&tags=b)
+// instead of the default ?tags[]=a&tags[]=b (which the backend can't parse).
+const api = axios.create({
+  baseURL: '/api',
+  withCredentials: true,
+  paramsSerializer: { indexes: null },
+})
 
 export const authApi = {
   async me(): Promise<{ authenticated: boolean }> {
@@ -68,15 +74,19 @@ export interface ItemInput {
   currency?: string
   category_id?: string | null
   tags?: string[]
+  /** Feed the categorization memory on this edit (defaults on for single edits). */
+  update_memory?: boolean
 }
 
 export interface ItemListParams {
   month?: string
   status?: string
   search?: string
-  category_id?: string
+  /** Comma-separated category ids (OR). */
+  category_ids?: string
   kind?: string
-  tag?: string
+  /** Comma-separated tags (OR: item carries any). */
+  tags?: string
   bank?: string
   sort?: string
   limit?: number
@@ -212,11 +222,24 @@ export interface DashboardParams {
   date_from?: string
   date_to?: string
   search?: string
-  category_id?: string
+  /** Comma-separated category ids (OR). */
+  category_ids?: string
   kind?: string
-  tag?: string
+  /** Comma-separated tags (OR). */
+  tags?: string
   bank?: string
   installments?: 'all' | 'first_only' | 'only'
+}
+
+export interface DailyPoint {
+  date: string
+  key: string | null
+  total_cents: number
+}
+
+export interface TagTotal {
+  tag: string
+  total_cents: number
 }
 
 export const dashboardApi = {
@@ -227,6 +250,14 @@ export const dashboardApi = {
     return (await api.get<TrendPoint[]>('/dashboard/trend', {
       params: { months, ...params },
     })).data
+  },
+  /** Daily expense totals: `stack_by='category'` (stacked bar) or `'none'` (calendar). */
+  async daily(params: DashboardParams & { stack_by?: 'category' | 'none' } = {}): Promise<DailyPoint[]> {
+    return (await api.get<DailyPoint[]>('/dashboard/daily', { params })).data
+  },
+  /** Top tags by expense total (spend carrying each tag, overlap allowed). */
+  async tags(params: DashboardParams = {}): Promise<TagTotal[]> {
+    return (await api.get<TagTotal[]>('/dashboard/tags', { params })).data
   },
 }
 
@@ -303,6 +334,7 @@ export interface MemoryEntry {
   merchant: string
   category_id: string | null
   category_name: string | null
+  tags: string[]
   confidence: number
   confirm_count: number
   last_confirmed_at: string | null
@@ -311,10 +343,26 @@ export interface MemoryEntry {
 export interface MemoryInput {
   merchant: string
   category_id: string | null
+  tags?: string[]
 }
 
 export interface MemoryUpdateInput {
   category_id: string | null
+  tags?: string[]
+}
+
+/** One item the user can select to apply memory to (from `/memory/preview`). */
+export interface MemoryPreviewItem {
+  item_id: string
+  merchant: string
+  description: string
+  occurred_on: string
+  amount_cents: number
+  current_category: string | null
+  proposed_category: string | null
+  tags_to_add: string[]
+  /** Subset of ['category', 'tags'] — what would change. */
+  changes: string[]
 }
 
 export const memoryApi = {
@@ -330,11 +378,11 @@ export const memoryApi = {
   async remove(id: string): Promise<{ ok: boolean }> {
     return (await api.delete(`/memory/${id}`)).data
   },
-  async applyAll(merchant: string): Promise<{ updated: number }> {
-    return (await api.post('/memory/apply-all', { merchant })).data
+  async preview(merchant: string | null): Promise<MemoryPreviewItem[]> {
+    return (await api.post<MemoryPreviewItem[]>('/memory/preview', { merchant })).data
   },
-  async applyAllGlobal(): Promise<{ updated: number }> {
-    return (await api.post('/memory/apply-all-global')).data
+  async apply(merchant: string | null, ids: string[]): Promise<{ updated: number }> {
+    return (await api.post('/memory/apply', { merchant, ids })).data
   },
 }
 

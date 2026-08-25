@@ -25,8 +25,8 @@ pub async fn process_document(pool: &PgPool, doc: &DocumentRow, ai: &AiClient) -
 
     // After any ingestion, try to link receipts to statement items.
     linking::suggest_links_all(pool).await?;
-    // And fix up Pix expenses that were actually card payments.
-    reclassify_card_payments(pool).await?;
+    // And fix up Pix expenses that were actually internal moves (card payments / transfers).
+    reclassify_pix_as_internal(pool).await?;
     Ok(())
 }
 
@@ -61,11 +61,13 @@ async fn process_csv(pool: &PgPool, doc: &DocumentRow) -> Result<()> {
     Ok(())
 }
 
-/// Reclassify bank-statement Pix/ENVIO expenses that match a known card payment
-/// (same |amount|, within a few days) as `card_payment` — they were paying a card.
-pub async fn reclassify_card_payments(pool: &PgPool) -> Result<usize> {
-    let card_payments: Vec<(i64, NaiveDate)> = sqlx::query_as(
-        "SELECT abs(amount_cents), occurred_on FROM items WHERE kind = 'card_payment'",
+/// Reclassify bank-statement Pix/ENVIO expenses that match a known internal
+/// movement (same |amount|, within a few days) as `internal` — e.g. a Pix
+/// paying a credit-card bill, or the other side of an own-account transfer.
+/// They are tracked but must not count as expenses.
+pub async fn reclassify_pix_as_internal(pool: &PgPool) -> Result<usize> {
+    let internals: Vec<(i64, NaiveDate)> = sqlx::query_as(
+        "SELECT abs(amount_cents), occurred_on FROM items WHERE kind = 'internal'",
     )
     .fetch_all(pool)
     .await?;
@@ -84,10 +86,10 @@ pub async fn reclassify_card_payments(pool: &PgPool) -> Result<usize> {
         if !(lower.contains("pix") || lower.contains("envio")) {
             continue;
         }
-        if card_payments.iter().any(|(cp_amount, cp_date)| {
+        if internals.iter().any(|(cp_amount, cp_date)| {
             *cp_amount == amount && (date - *cp_date).num_days().abs() <= 5
         }) {
-            sqlx::query("UPDATE items SET kind = 'card_payment', updated_at = now() WHERE id = $1")
+            sqlx::query("UPDATE items SET kind = 'internal', updated_at = now() WHERE id = $1")
                 .bind(id)
                 .execute(pool)
                 .await?;
@@ -384,13 +386,7 @@ fn alias_category(s: &str) -> String {
 }
 
 fn normalize_kind(kind: Option<&str>, amount: i64) -> String {
-    const KINDS: &[&str] = &[
-        "expense",
-        "income",
-        "refund",
-        "card_payment",
-        "investment",
-    ];
+    const KINDS: &[&str] = &["expense", "income", "refund", "internal"];
     match kind {
         Some(k) if KINDS.contains(&k) => k.to_string(),
         _ => {

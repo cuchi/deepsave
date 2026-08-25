@@ -57,8 +57,12 @@ cd frontend && npm run build       # type-check + build frontend
 - **Documents are processed asynchronously** by a background worker (`backend/src/services/queue.rs`); `documents.status` goes `pending → processing → processed | failed`. Uploaded files live under `STORAGE_DIR` (container: `/app/storage`).
 - **Parsers** live in `backend/src/services/parsers/` — `csv.rs` (Nubank card/account, C6 card/bank) and `caixa_card.rs` (Caixa credit-card fatura PDF). Add new bank formats there. They produce `ParsedItem`s that are inserted as `confirmed`.
 - **OCR/PDF** text extraction is in `backend/src/services/extract.rs` (tesseract CLI + pdf-extract); AI structuring is the fallback for non-structured PDFs.
-- **Linking / memory** live in `backend/src/services/{linking,memory}.rs`. Receipt→statement match suggestions are created on receipt ingestion; confirm them via `/api/matches/{id}/accept`. Merchant memory is upserted on item confirm/edit and injected into AI prompts (gated at `confirm_count >= 2`).
-- **Categories are intrinsic to a merchant; tags are situational.** Memory auto-applies only the *category* (`apply-memory` / `apply-all`); tags are per-item and never bulk-applied.
+- **Linking / memory** live in `backend/src/services/{linking,memory}.rs`. Receipt→statement match suggestions are created on receipt ingestion; confirm them via `/api/matches/{id}/accept`. Merchant memory (category + tags) is upserted on item confirm, on AI-tag apply, and on single-item edit (opt-out via `ItemInput.update_memory`, defaults on — the edit form has a "Salvar na memória" checkbox); injected into AI prompts (gated at `confirm_count >= 2`). Bulk applies go through **preview first** (`POST /memory/preview` lists the items that would change; `POST /memory/apply` touches only the selected ids).
+- **Categories are intrinsic to a merchant; tags are situational.** Memory now records both:
+  `merchant_memory` carries `category_id` (latest wins) **and** `tags` (accumulate/union over
+  confirmations). Applying memory (`apply-memory` per item, `POST /memory/preview` + `/memory/apply`
+  for bulk) sets the category (replace) **and adds** the remembered tags (never removes item tags).
+  Tag rename/merge/delete cascade to items, recurring rules and merchant memory.
 - **Recurring items** live in `backend/src/services/recurring.rs` + `routes/recurring.rs`. Detection is suggestion-only (user confirms). Rules are **analytics-only — they never auto-create items** (avoids double-counting with statement items); `upcoming` is a pure forecast.
 
 ## Before committing

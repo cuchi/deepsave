@@ -16,9 +16,11 @@ pub struct DashboardQuery {
     pub date_from: Option<NaiveDate>,
     pub date_to: Option<NaiveDate>,
     pub search: Option<String>,
-    pub category_id: Option<Uuid>,
+    /// Comma-separated category ids (OR).
+    pub category_ids: Option<String>,
     pub kind: Option<String>,
-    pub tag: Option<String>,
+    /// Comma-separated tags (OR: item carries any).
+    pub tags: Option<String>,
     pub bank: Option<String>,
     pub installments: Option<String>,
 }
@@ -28,9 +30,11 @@ pub struct TrendQuery {
     pub months: Option<i32>,
     pub date_to: Option<NaiveDate>,
     pub search: Option<String>,
-    pub category_id: Option<Uuid>,
+    /// Comma-separated category ids (OR).
+    pub category_ids: Option<String>,
     pub kind: Option<String>,
-    pub tag: Option<String>,
+    /// Comma-separated tags (OR: item carries any).
+    pub tags: Option<String>,
     pub bank: Option<String>,
     pub installments: Option<String>,
 }
@@ -68,8 +72,8 @@ pub struct TrendPoint {
 }
 
 /// Shared WHERE for dashboard/trend aggregation. Params $1..$8: date_from,
-/// date_to, search, category_id, kind, tag, bank, installments. Unlike the items
-/// list, rejected items are always excluded (they're not real activity).
+/// date_to, search, category_ids, kind, tags, bank, installments. Unlike the
+/// items list, rejected items are always excluded (they're not real activity).
 const AGG_FILTERS: &str = "
     ($1::date IS NULL OR occurred_on >= $1)
     AND ($2::date IS NULL OR occurred_on <= $2)
@@ -78,9 +82,13 @@ const AGG_FILTERS: &str = "
          OR description ILIKE '%' || $3 || '%'
          OR COALESCE(merchant, '') ILIKE '%' || $3 || '%'
          OR array_to_string(tags, ' ') ILIKE '%' || $3 || '%')
-    AND ($4::uuid IS NULL OR category_id = $4)
+    AND (cardinality($4) = 0
+         OR category_id::text = ANY($4)
+         OR ('__none' = ANY($4) AND category_id IS NULL))
     AND ($5::text IS NULL OR kind = $5)
-    AND ($6::text IS NULL OR $6 = ANY(tags))
+    AND (cardinality($6) = 0
+         OR tags && $6
+         OR ('__none' = ANY($6) AND cardinality(tags) = 0))
     AND ($7::text IS NULL OR EXISTS (
           SELECT 1 FROM documents d
           JOIN sources s ON s.id = d.source_id
@@ -91,7 +99,8 @@ const AGG_FILTERS: &str = "
 ";
 
 /// Resolve the aggregation window: explicit date range wins; else `month`;
-/// else the last complete calendar month (matches the default in the UI).
+/// else no date filter (all history). The UI pre-fills the last complete month
+/// on first load, but the API itself must not — "cleared dates" means "tudo".
 fn resolve_range(
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
@@ -104,27 +113,21 @@ fn resolve_range(
         return Ok((Some(from), Some(to), format!("{from}..{to}")));
     }
 
-    let (year, month_num) = match month {
-        Some(m) => {
-            let (y, mo) = m
-                .split_once('-')
-                .ok_or_else(|| AppError::bad_request("month must be YYYY-MM"))?;
-            let y: i32 = y
-                .parse()
-                .map_err(|_| AppError::bad_request("invalid month"))?;
-            let mo: u32 = mo
-                .parse()
-                .map_err(|_| AppError::bad_request("invalid month"))?;
-            if !(1..=12).contains(&mo) {
-                return Err(AppError::bad_request("invalid month"));
-            }
-            (y, mo)
-        }
-        None => {
-            let (start, _) = last_complete_month();
-            (start.year(), start.month())
-        }
+    let Some(m) = month else {
+        return Ok((None, None, "tudo".to_string()));
     };
+    let (y, mo) = m
+        .split_once('-')
+        .ok_or_else(|| AppError::bad_request("month must be YYYY-MM"))?;
+    let year: i32 = y
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid month"))?;
+    let month_num: u32 = mo
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid month"))?;
+    if !(1..=12).contains(&month_num) {
+        return Err(AppError::bad_request("invalid month"));
+    }
 
     let start = NaiveDate::from_ymd_opt(year, month_num, 1)
         .ok_or_else(|| AppError::bad_request("invalid month"))?;
@@ -138,13 +141,16 @@ fn resolve_range(
     Ok((Some(start), Some(end), format!("{year:04}-{month_num:02}")))
 }
 
-/// First and last day of the previous calendar month.
-fn last_complete_month() -> (NaiveDate, NaiveDate) {
-    let today = chrono::Utc::now().date_naive();
-    let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
-    let start = first - Months::new(1);
-    let end = first - chrono::Duration::days(1);
-    (start, end)
+/// Parse a comma-separated filter list (see `routes::items::split_filters`).
+pub(crate) fn split_filters(s: &Option<String>) -> Vec<String> {
+    s.as_deref()
+        .map(|v| {
+            v.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub async fn dashboard(
@@ -159,7 +165,8 @@ pub async fn dashboard(
 /// their parent and would double-count).
 pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboard, AppError> {
     let (from, to, label) = resolve_range(q.date_from, q.date_to, q.month.as_deref())?;
-
+    let category_ids = split_filters(&q.category_ids);
+    let tags = split_filters(&q.tags);
     let (spend, income): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT COALESCE(SUM(CASE WHEN kind = 'expense' THEN -amount_cents ELSE 0 END), 0)::bigint,
                 COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0)::bigint
@@ -169,9 +176,9 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     .bind(from)
     .bind(to)
     .bind(&q.search)
-    .bind(q.category_id)
+    .bind(&category_ids)
     .bind(&q.kind)
-    .bind(&q.tag)
+    .bind(&tags)
     .bind(&q.bank)
     .bind(&q.installments)
     .fetch_one(pool)
@@ -189,9 +196,9 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     .bind(from)
     .bind(to)
     .bind(&q.search)
-    .bind(q.category_id)
+    .bind(&category_ids)
     .bind(&q.kind)
-    .bind(&q.tag)
+    .bind(&tags)
     .bind(&q.bank)
     .bind(&q.installments)
     .fetch_all(pool)
@@ -209,9 +216,9 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     .bind(from)
     .bind(to)
     .bind(&q.search)
-    .bind(q.category_id)
+    .bind(&category_ids)
     .bind(&q.kind)
-    .bind(&q.tag)
+    .bind(&tags)
     .bind(&q.bank)
     .bind(&q.installments)
     .fetch_all(pool)
@@ -244,6 +251,8 @@ pub async fn trend(
 /// when the range is a single month.
 pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>, AppError> {
     let months = q.months.unwrap_or(12).clamp(1, 36);
+    let category_ids = split_filters(&q.category_ids);
+    let tags = split_filters(&q.tags);
 
     let today = chrono::Utc::now().date_naive();
     let end_month = match q.date_to {
@@ -265,9 +274,9 @@ pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>
     .bind(start)
     .bind(end)
     .bind(&q.search)
-    .bind(q.category_id)
+    .bind(&category_ids)
     .bind(&q.kind)
-    .bind(&q.tag)
+    .bind(&tags)
     .bind(&q.bank)
     .bind(&q.installments)
     .fetch_all(pool)
@@ -291,4 +300,112 @@ pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>
     }
 
     Ok(out)
+}
+
+// ---------- Daily / tags (expenses only) ----------
+
+/// Filters for the daily and top-tags aggregations (no month param — the
+/// frontend passes an explicit range; None = unbounded).
+#[derive(Debug, Deserialize)]
+pub struct DailyQuery {
+    pub date_from: Option<NaiveDate>,
+    pub date_to: Option<NaiveDate>,
+    pub search: Option<String>,
+    pub category_ids: Option<String>,
+    pub kind: Option<String>,
+    pub tags: Option<String>,
+    pub bank: Option<String>,
+    pub installments: Option<String>,
+    /// 'category' (per day per category) or 'none' (plain daily totals).
+    #[serde(default = "default_stack_by")]
+    pub stack_by: String,
+}
+
+fn default_stack_by() -> String {
+    "category".to_string()
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct DailyPoint {
+    pub date: NaiveDate,
+    /// Category name when `stack_by=category`, else NULL.
+    pub key: Option<String>,
+    pub total_cents: i64,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct TagTotal {
+    pub tag: String,
+    pub total_cents: i64,
+}
+
+pub async fn daily(
+    State(state): State<AppState>,
+    Query(q): Query<DailyQuery>,
+) -> Result<Json<Vec<DailyPoint>>, AppError> {
+    Ok(Json(daily_data(&state.pool, &q).await?))
+}
+
+/// Daily expense totals (roots only, rejected excluded). `stack_by=category`
+/// buckets each day by category name; `none` returns one row per day. The `kind`
+/// filter still applies on top of the hard `kind = 'expense'` (so a kind=income
+/// filter yields an empty chart, which is honest feedback).
+pub async fn daily_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<DailyPoint>, AppError> {
+    let category_ids = split_filters(&q.category_ids);
+    let tags = split_filters(&q.tags);
+    let rows = sqlx::query_as::<_, DailyPoint>(sqlx::AssertSqlSafe(format!(
+        "SELECT items.occurred_on AS date,
+                CASE WHEN $9 = 'category' THEN COALESCE(c.name, 'Sem categoria') END AS key,
+                SUM(-items.amount_cents)::bigint AS total_cents
+         FROM items
+         LEFT JOIN categories c ON c.id = items.category_id
+         WHERE items.parent_id IS NULL AND items.kind = 'expense' AND {AGG_FILTERS}
+         GROUP BY items.occurred_on, key
+         ORDER BY items.occurred_on, key"
+    )))
+    .bind(q.date_from)
+    .bind(q.date_to)
+    .bind(&q.search)
+    .bind(&category_ids)
+    .bind(&q.kind)
+    .bind(&tags)
+    .bind(&q.bank)
+    .bind(&q.installments)
+    .bind(&q.stack_by)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn tags(
+    State(state): State<AppState>,
+    Query(q): Query<DailyQuery>,
+) -> Result<Json<Vec<TagTotal>>, AppError> {
+    Ok(Json(tags_data(&state.pool, &q).await?))
+}
+
+/// Top tags by expense total. Each tag counts the FULL amount of its items
+/// (overlap allowed — that's the point: "spend carrying this tag").
+pub async fn tags_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<TagTotal>, AppError> {
+    let category_ids = split_filters(&q.category_ids);
+    let tags = split_filters(&q.tags);
+    let rows = sqlx::query_as::<_, TagTotal>(sqlx::AssertSqlSafe(format!(
+        "SELECT tag, SUM(-items.amount_cents)::bigint AS total_cents
+         FROM items CROSS JOIN LATERAL unnest(items.tags) AS tag
+         WHERE items.parent_id IS NULL AND items.kind = 'expense' AND {AGG_FILTERS}
+         GROUP BY tag
+         ORDER BY total_cents DESC
+         LIMIT 10"
+    )))
+    .bind(q.date_from)
+    .bind(q.date_to)
+    .bind(&q.search)
+    .bind(&category_ids)
+    .bind(&q.kind)
+    .bind(&tags)
+    .bind(&q.bank)
+    .bind(&q.installments)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }

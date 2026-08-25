@@ -34,10 +34,8 @@ async fn usage_counts_per_tag(pool: PgPool) {
     seed_item(&pool, "c", &["mercado", "lazer"]).await;
 
     let usage = tags::usage(&pool).await.unwrap();
-    let by_tag: std::collections::HashMap<_, _> = usage
-        .iter()
-        .map(|u| (u.tag.as_str(), u.count))
-        .collect();
+    let by_tag: std::collections::HashMap<_, _> =
+        usage.iter().map(|u| (u.tag.as_str(), u.count)).collect();
 
     assert_eq!(by_tag.get("compras"), Some(&2));
     assert_eq!(by_tag.get("mercado"), Some(&2));
@@ -58,13 +56,11 @@ async fn rename_cascades_and_dedupes(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO merchant_memory (merchant, tags) VALUES ('loja x', $1)",
-    )
-    .bind(&vec!["compras".to_string()])
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO merchant_memory (merchant, tags) VALUES ('loja x', $1)")
+        .bind(&vec!["compras".to_string()])
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let res = tags::rename(&pool, "compras", "mercado").await.unwrap();
     assert_eq!(res.items_updated, 2);
@@ -116,7 +112,7 @@ async fn remove_tag_drops_it_everywhere(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn normalize_one_handles_accents_and_case(pool: PgPool) {
+async fn normalize_one_handles_accents_and_case(_pool: PgPool) {
     let n = tags::normalize_one("  Compras Extra  ").unwrap();
     assert_eq!(n, "compras extra");
     assert!(tags::normalize_one("  ").is_none());
