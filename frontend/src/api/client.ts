@@ -1,14 +1,17 @@
 import axios from 'axios'
 import type {
+  AiTagBatch,
   Category,
   CoverageData,
   DocumentDetail,
   DocumentSummary,
   Item,
+  ItemSummary,
   MatchDetail,
   RecurringRule,
   RecurringSuggestion,
   Source,
+  SuggestionDetail,
   TagUsage,
   UpcomingOccurrence,
 } from '../lib/types'
@@ -76,6 +79,12 @@ export interface ItemListParams {
   tag?: string
   bank?: string
   sort?: string
+  limit?: number
+  /** 'first_only' keeps non-installments + 1st parcel; 'only' shows just installments. */
+  installments?: 'all' | 'first_only' | 'only'
+  /** Inclusive date-range bounds (YYYY-MM-DD). */
+  date_from?: string
+  date_to?: string
 }
 
 export interface BulkItemUpdateInput {
@@ -106,6 +115,9 @@ export const itemsApi = {
   },
   async bulkUpdate(input: BulkItemUpdateInput): Promise<{ updated: number }> {
     return (await api.patch<{ updated: number }>('/items/bulk', input)).data
+  },
+  async summary(params: ItemListParams = {}): Promise<ItemSummary> {
+    return (await api.get<ItemSummary>('/items/summary', { params })).data
   },
   async remove(id: string): Promise<{ ok: boolean }> {
     return (await api.delete(`/items/${id}`)).data
@@ -195,12 +207,26 @@ export interface TrendPoint {
   income_cents: number
 }
 
+export interface DashboardParams {
+  month?: string
+  date_from?: string
+  date_to?: string
+  search?: string
+  category_id?: string
+  kind?: string
+  tag?: string
+  bank?: string
+  installments?: 'all' | 'first_only' | 'only'
+}
+
 export const dashboardApi = {
-  async get(month: string): Promise<DashboardData> {
-    return (await api.get<DashboardData>('/dashboard', { params: { month } })).data
+  async get(params: DashboardParams = {}): Promise<DashboardData> {
+    return (await api.get<DashboardData>('/dashboard', { params })).data
   },
-  async trend(months = 12): Promise<TrendPoint[]> {
-    return (await api.get<TrendPoint[]>('/dashboard/trend', { params: { months } })).data
+  async trend(months = 12, params: DashboardParams = {}): Promise<TrendPoint[]> {
+    return (await api.get<TrendPoint[]>('/dashboard/trend', {
+      params: { months, ...params },
+    })).data
   },
 }
 
@@ -216,6 +242,34 @@ export const sourcesApi = {
 export const coverageApi = {
   async get(): Promise<CoverageData> {
     return (await api.get<CoverageData>('/coverage')).data
+  },
+}
+
+export const aiTagsApi = {
+  /** Enqueue AI tagging for the selected items. */
+  async createBatch(ids: string[]): Promise<AiTagBatch> {
+    return (await api.post<AiTagBatch>('/ai-tags/batches', { ids })).data
+  },
+  async listBatches(): Promise<AiTagBatch[]> {
+    return (await api.get<AiTagBatch[]>('/ai-tags/batches')).data
+  },
+  async listSuggestions(batchId?: string): Promise<SuggestionDetail[]> {
+    return (await api.get<SuggestionDetail[]>('/ai-tags/suggestions', {
+      params: batchId ? { batch_id: batchId } : {},
+    })).data
+  },
+  /** Apply a suggestion; `tags` overrides the stored proposal (post-edit). */
+  async apply(id: string, tags?: string[]): Promise<{ ok: boolean; tags: string[] }> {
+    return (await api.post(`/ai-tags/suggestions/${id}/apply`, tags ? { tags } : {})).data
+  },
+  async dismiss(id: string): Promise<{ ok: boolean }> {
+    return (await api.post(`/ai-tags/suggestions/${id}/dismiss`)).data
+  },
+  async applyAll(batchId?: string): Promise<{ ok: boolean; applied: number }> {
+    return (await api.post('/ai-tags/suggestions/apply-all', batchId ? { batch_id: batchId } : {})).data
+  },
+  async dismissAll(batchId?: string): Promise<{ ok: boolean; dismissed: number }> {
+    return (await api.post('/ai-tags/suggestions/dismiss-all', batchId ? { batch_id: batchId } : {})).data
   },
 }
 

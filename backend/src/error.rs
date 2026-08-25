@@ -19,6 +19,9 @@ impl AppError {
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::NotFound(msg.into())
     }
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self::Conflict(msg.into())
+    }
 }
 
 impl IntoResponse for AppError {

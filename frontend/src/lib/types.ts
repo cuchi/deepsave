@@ -133,3 +133,34 @@ export interface TagUsage {
   tag: string
   count: number
 }
+
+export interface ItemSummary {
+  count: number
+  total_cents: number
+}
+
+export interface AiTagBatch {
+  id: string
+  status: 'pending' | 'processing' | 'done' | 'failed'
+  error_message: string | null
+  item_count: number
+  created_at: string
+  processed_at: string | null
+}
+
+export interface SuggestionDetail {
+  id: string
+  batch_id: string
+  batch_status: string
+  item_id: string
+  suggested_tags: string[]
+  status: 'pending' | 'applied' | 'dismissed'
+  created_at: string
+  merchant: string | null
+  description: string
+  amount_cents: number
+  occurred_on: string
+  category_id: string | null
+  category_name: string | null
+  tags: string[]
+}

@@ -100,6 +100,15 @@ pub struct ItemInput {
     pub tags: Vec<String>,
 }
 
+/// Filtered summary for the items list (`GET /api/items/summary`).
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct ItemSummary {
+    /// Number of root items matching the filters.
+    pub count: i64,
+    /// Net sum of `amount_cents` (negative = expense).
+    pub total_cents: i64,
+}
+
 // ---------- Bulk item updates ----------
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -223,6 +232,39 @@ pub struct MemoryEntry {
     pub confidence: f32,
     pub confirm_count: i32,
     pub last_confirmed_at: Option<DateTime<Utc>>,
+}
+
+// ---------- AI tag batches ----------
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct AiTagBatch {
+    pub id: Uuid,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub item_count: i64,
+    pub created_at: DateTime<Utc>,
+    pub processed_at: Option<DateTime<Utc>>,
+}
+
+/// A tag suggestion joined with the item it refers to (for the review UI).
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct SuggestionDetail {
+    pub id: Uuid,
+    pub batch_id: Uuid,
+    /// Status of the owning batch ('done' when the suggestions are reviewable).
+    pub batch_status: String,
+    pub item_id: Uuid,
+    pub suggested_tags: Vec<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    // Item columns (joined in).
+    pub merchant: Option<String>,
+    pub description: String,
+    pub amount_cents: i64,
+    pub occurred_on: NaiveDate,
+    pub category_id: Option<Uuid>,
+    pub category_name: Option<String>,
+    pub tags: Vec<String>,
 }
 
 // ---------- Recurring rules ----------

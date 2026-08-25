@@ -66,6 +66,42 @@ and **Caixa credit-card fatura PDF** parsers; `investment` + `card_payment` kind
 Backend: `GET /api/tags/usage`, `PATCH /api/tags/rename`, `POST /api/tags/merge`,
 `DELETE /api/tags/{tag}` (all tags normalized: lowercase + strip accents).
 
+### M11 — AI-assisted bulk tagging
+Select items in the month view → “Taggear com IA” → a background batch (same worker
+pattern as documents) sends a **compact payload** to DeepSeek: all existing tags, the
+selected items (description, merchant, amount, date, category, tags) and, per merchant,
+the last 3 confirmed tagged examples. Proposals land on the **Revisar** page, where each
+item shows editable tag chips (add/remove, autocomplete) with `aplicar`/`ignorar` and
+batch-level `aplicar tudo`/`ignorar tudo`. Applying merges the tags into the item (add
+mode, deduped/normalized).
+Backend: `ai_tag_batches` + `ai_tag_suggestions` tables, `services/ai_tags.rs` worker,
+`/api/ai-tags/*` routes; AI call purpose `tag_batch` (recorded in `ai_calls`).
+
+### M12 — Dashboard split: Gráficos × Lista
+The dashboard was split into two pages: **Gráficos** (`/`, `/months/:ym` — month
+selector + summary cards, pie, 12-month trend, top merchants, missing-sources alert)
+and **Lista** (`/lista` — the item list over the **whole history**, capped at 500
+rows via a new `limit` query param on `GET /api/items`, with search/filters/sort,
+bulk edit and “Taggear com IA” in the same list). `MonthView` removed.
+
+### M13 — Lista refinements
+Filters are always expanded (no toggle). New **Parcelas** filter
+(`installments` on `GET /api/items`: `all` / `first_only` — hides later
+installments, keeping non-installments and the 1st parcel of each series — /
+`only` — just installment items, all parcels) and a **date range** filter
+(`date_from` / `date_to`, inclusive). Rows show the installment as
+`x/y` after the name. New `GET /api/items/summary` (shared filter fragment,
+roots-only net total + count) shown above the table: “Total: … · N itens”.
+
+### M14 — Graphs get the filters
+Shared `ItemFilters` component (search, date range, category, tag, bank, kind,
+installments; sort is list-only) now drives both **Lista** and **Gráficos**. The
+month selector is gone; the date range defaults to the **last complete month**.
+`GET /api/dashboard` and `GET /api/dashboard/trend` accept the same filters
+(shared `AGG_FILTERS` fragment; rejected items excluded; aggregation is
+roots-only — receipt children no longer double-count spend). Trend window ends
+at `date_to`'s month (rolling 12 months).
+
 ## Established decisions (as implemented)
 
 - PostgreSQL (SQLite rejected); signed-cookie auth; single `APP_PASSWORD` / `APP_PASSWORD_HASH`.

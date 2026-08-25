@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::models::{BulkItemUpdate, Item, ItemInput, TagsMode};
+use crate::models::{BulkItemUpdate, Item, ItemInput, ItemSummary, TagsMode};
 use crate::services::{memory, tags};
 use crate::AppState;
 
@@ -42,6 +42,15 @@ pub struct ListQuery {
     pub bank: Option<String>,
     /// 'date' (default) or 'value'.
     pub sort: Option<String>,
+    /// Cap the number of rows returned (e.g. 500 for the global list).
+    pub limit: Option<i32>,
+    /// Installment filter: 'first_only' keeps non-installments + the 1st parcel
+    /// of each series; 'only' shows just installment items (all parcels).
+    pub installments: Option<String>,
+    /// Earliest date (inclusive) for the date-range filter.
+    pub date_from: Option<NaiveDate>,
+    /// Latest date (inclusive) for the date-range filter.
+    pub date_to: Option<NaiveDate>,
 }
 
 fn month_range(month: Option<&str>) -> Result<(Option<NaiveDate>, Option<NaiveDate>), AppError> {
@@ -72,45 +81,105 @@ fn month_range(month: Option<&str>) -> Result<(Option<NaiveDate>, Option<NaiveDa
     Ok((Some(start), Some(end)))
 }
 
-// Note: the `format!` output is composed only of constant column lists (never user
-// input), so wrapping in `AssertSqlSafe` is safe.
+// Note: the `format!` output below is composed only of constant column lists and
+// the shared filter fragment (never user input), so wrapping in `AssertSqlSafe`
+// is safe.
+
+/// Shared WHERE fragment for the items list and the filtered summary.
+/// Parameters $1..$11 (bind order: month start, month end, status, search,
+/// category_id, kind, tag, bank, installments, date_from, date_to).
+const ITEM_FILTERS: &str = "
+    ($1::date IS NULL OR occurred_on >= $1)
+    AND ($2::date IS NULL OR occurred_on < $2)
+    AND ($3::text IS NULL OR status = $3)
+    AND ($4::text IS NULL
+         OR description ILIKE '%' || $4 || '%'
+         OR COALESCE(merchant, '') ILIKE '%' || $4 || '%'
+         OR array_to_string(tags, ' ') ILIKE '%' || $4 || '%')
+    AND ($5::uuid IS NULL OR category_id = $5)
+    AND ($6::text IS NULL OR kind = $6)
+    AND ($7::text IS NULL OR $7 = ANY(tags))
+    AND ($8::text IS NULL OR EXISTS (
+          SELECT 1 FROM documents d
+          JOIN sources s ON s.id = d.source_id
+          WHERE d.id = items.document_id AND s.bank = $8))
+    AND ($9::text IS NULL
+         OR $9 = 'all'
+         OR ($9 = 'first_only' AND NOT (COALESCE(installment_count, 0) > 1 AND COALESCE(installment, 0) > 1))
+         OR ($9 = 'only' AND COALESCE(installment_count, 0) > 1))
+    AND ($10::date IS NULL OR occurred_on >= $10)
+    AND ($11::date IS NULL OR occurred_on <= $11)";
+
+/// Core list query, kept separate from the handler so integration tests can
+/// drive it without an `AppState` (mirrors `bulk_update_items`).
+pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppError> {
+    let (start, end) = month_range(q.month.as_deref())?;
+    let items = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
+        "SELECT {ITEM_COLS} FROM items
+         WHERE {ITEM_FILTERS}
+         ORDER BY
+           CASE WHEN $12 = 'value' THEN abs(amount_cents) END DESC,
+           occurred_on DESC, created_at DESC
+         LIMIT COALESCE($13, 1000000)"
+    )))
+    .bind(start)
+    .bind(end)
+    .bind(&q.status)
+    .bind(&q.search)
+    .bind(q.category_id)
+    .bind(&q.kind)
+    .bind(&q.tag)
+    .bind(&q.bank)
+    .bind(&q.installments)
+    .bind(q.date_from)
+    .bind(q.date_to)
+    .bind(&q.sort)
+    .bind(q.limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(items)
+}
+
+/// Filtered summary (count + net total) for the same filters as [`list_items`].
+/// Sums **root** items only (`parent_id IS NULL`) — receipt children are
+/// allocations of their parent and would double-count. Ignores `sort`/`limit`.
+pub async fn summary(pool: &PgPool, q: &ListQuery) -> Result<ItemSummary, AppError> {
+    let (start, end) = month_range(q.month.as_deref())?;
+    let row = sqlx::query_as::<_, ItemSummary>(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*)::bigint AS count,
+                COALESCE(SUM(amount_cents), 0)::bigint AS total_cents
+         FROM items
+         WHERE parent_id IS NULL AND {ITEM_FILTERS}"
+    )))
+    .bind(start)
+    .bind(end)
+    .bind(&q.status)
+    .bind(&q.search)
+    .bind(q.category_id)
+    .bind(&q.kind)
+    .bind(&q.tag)
+    .bind(&q.bank)
+    .bind(&q.installments)
+    .bind(q.date_from)
+    .bind(q.date_to)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 pub async fn list(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<Item>>, AppError> {
-    let (start, end) = month_range(q.month.as_deref())?;
-    let items = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
-        "SELECT {ITEM_COLS} FROM items
-         WHERE ($1::date IS NULL OR occurred_on >= $1)
-           AND ($2::date IS NULL OR occurred_on < $2)
-           AND ($3::text IS NULL OR status = $3)
-           AND ($4::text IS NULL
-                OR description ILIKE '%' || $4 || '%'
-                OR COALESCE(merchant, '') ILIKE '%' || $4 || '%'
-                OR array_to_string(tags, ' ') ILIKE '%' || $4 || '%')
-           AND ($5::uuid IS NULL OR category_id = $5)
-           AND ($6::text IS NULL OR kind = $6)
-           AND ($7::text IS NULL OR $7 = ANY(tags))
-           AND ($8::text IS NULL OR EXISTS (
-                 SELECT 1 FROM documents d
-                 JOIN sources s ON s.id = d.source_id
-                 WHERE d.id = items.document_id AND s.bank = $8))
-         ORDER BY
-           CASE WHEN $9 = 'value' THEN abs(amount_cents) END DESC,
-           occurred_on DESC, created_at DESC"
-    )))
-    .bind(start)
-    .bind(end)
-    .bind(q.status)
-    .bind(q.search)
-    .bind(q.category_id)
-    .bind(q.kind)
-    .bind(q.tag)
-    .bind(q.bank)
-    .bind(q.sort)
-    .fetch_all(&state.pool)
-    .await?;
-    Ok(Json(items))
+    Ok(Json(list_items(&state.pool, &q).await?))
+}
+
+/// `GET /items/summary` — count + net total for the current filters.
+pub async fn items_summary(
+    State(state): State<AppState>,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<ItemSummary>, AppError> {
+    Ok(Json(summary(&state.pool, &q).await?))
 }
 
 /// Core bulk-edit logic, kept separate from the handler so integration tests can

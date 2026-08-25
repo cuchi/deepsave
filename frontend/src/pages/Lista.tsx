@@ -1,26 +1,11 @@
 import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  CartesianGrid,
-  Cell,
-  Legend,
-  Line,
-  LineChart,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
-import {
+  aiTagsApi,
   categoriesApi,
-  coverageApi,
-  dashboardApi,
   documentsApi,
   itemsApi,
-  recurringApi,
   sourcesApi,
   tagsApi,
   type BulkItemUpdateInput,
@@ -30,6 +15,10 @@ import { currentMonth, fmtCents } from '../lib/format'
 import ItemForm from '../components/ItemForm'
 import BulkEditModal from '../components/BulkEditModal'
 import BankLogo from '../components/BankLogo'
+import ItemFilters, { emptyFilters, type ItemFiltersValue } from '../components/ItemFilters'
+
+/** Global list cap: whole history, most recent first, capped for bulk workflows. */
+const LIST_LIMIT = 500
 
 interface FormState {
   open: boolean
@@ -45,35 +34,8 @@ const KIND_LABELS: Record<string, string> = {
   internal: 'Interna',
 }
 
-const PIE_COLORS = [
-  '#34d399', '#60a5fa', '#f472b6', '#f87171', '#fbbf24', '#a78bfa',
-  '#22d3ee', '#fb923c', '#a3e635', '#e879f9',
-]
-
-function shiftMonth(ym: string, delta: number): string {
-  const [y, m] = ym.split('-').map(Number)
-  const d = new Date(y, m - 1 + delta, 1)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-}
-
-function monthLabel(ym: string): string {
-  const [y, m] = ym.split('-').map(Number)
-  return new Date(y, m - 1, 1).toLocaleDateString('pt-BR', {
-    month: 'long',
-    year: 'numeric',
-  })
-}
-
 function shortDate(ymd: string): string {
   return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`
-}
-
-function fmtShort(cents: number): string {
-  const v = Math.abs(cents) / 100
-  if (v >= 1000) {
-    return `${(v / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}k`
-  }
-  return v.toLocaleString('pt-BR', { maximumFractionDigits: 0 })
 }
 
 function itemTitle(it: Item): string {
@@ -97,24 +59,14 @@ function signOf(cents: number): string {
   return cents > 0 ? '+' : cents < 0 ? '−' : ''
 }
 
-export default function MonthView() {
-  const { ym } = useParams()
+export default function Lista() {
   const navigate = useNavigate()
-  const month = ym ?? currentMonth()
-
   const [form, setForm] = useState<FormState>({ open: false })
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkOpen, setBulkOpen] = useState(false)
-  const [search, setSearch] = useState('')
-  const [categoryId, setCategoryId] = useState('')
-  const [tagFilter, setTagFilter] = useState('')
-  const [filtersOpen, setFiltersOpen] = useState(false)
-  const [bankFilter, setBankFilter] = useState('')
-  const [kindFilter, setKindFilter] = useState('')
-  const [sortBy, setSortBy] = useState('date')
+  const [filters, setFilters] = useState<ItemFiltersValue>(emptyFilters)
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [detailsFor, setDetailsFor] = useState<string | null>(null)
-  const [graphsOpen, setGraphsOpen] = useState(true)
   const [listOpen, setListOpen] = useState(true)
   const qc = useQueryClient()
 
@@ -122,42 +74,47 @@ export default function MonthView() {
   const { data: sources = [] } = useQuery({ queryKey: ['sources'], queryFn: sourcesApi.list })
   const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: tagsApi.list })
   const { data: docs = [] } = useQuery({ queryKey: ['documents'], queryFn: documentsApi.list })
-  const { data: coverage } = useQuery({ queryKey: ['coverage'], queryFn: coverageApi.get })
 
   const { data: items = [], isLoading, isPlaceholderData } = useQuery({
-    queryKey: ['items', month, search, categoryId, tagFilter, bankFilter, kindFilter, sortBy],
+    queryKey: ['items', 'all', filters],
     queryFn: () =>
       itemsApi.list({
-        month,
-        search: search || undefined,
-        category_id: categoryId || undefined,
-        tag: tagFilter || undefined,
-        bank: bankFilter || undefined,
-        kind: kindFilter || undefined,
-        sort: sortBy || undefined,
+        search: filters.search || undefined,
+        category_id: filters.categoryId || undefined,
+        tag: filters.tagFilter || undefined,
+        bank: filters.bankFilter || undefined,
+        kind: filters.kindFilter || undefined,
+        sort: filters.sortBy || undefined,
+        limit: LIST_LIMIT,
+        installments: filters.installments === 'all' ? undefined : filters.installments,
+        date_from: filters.dateFrom || undefined,
+        date_to: filters.dateTo || undefined,
       }),
     // Keep the previous list rendered while a filter change refetches, so the
     // page doesn't collapse to a loading line and the scroll position holds.
-    placeholderData: keepPreviousData,
+    placeholderData: (prev) => prev,
   })
 
-  const { data: dash } = useQuery({
-    queryKey: ['dashboard', month],
-    queryFn: () => dashboardApi.get(month),
-  })
-  const { data: trend = [] } = useQuery({
-    queryKey: ['dashboard-trend'],
-    queryFn: () => dashboardApi.trend(12),
-  })
-  const { data: upcoming = [] } = useQuery({
-    queryKey: ['recurring-upcoming'],
-    queryFn: recurringApi.upcoming,
+  // Net total of everything matching the filters (root items only, no cap).
+  const { data: summary = null } = useQuery({
+    queryKey: ['items-summary', filters],
+    queryFn: () =>
+      itemsApi.summary({
+        search: filters.search || undefined,
+        category_id: filters.categoryId || undefined,
+        tag: filters.tagFilter || undefined,
+        bank: filters.bankFilter || undefined,
+        kind: filters.kindFilter || undefined,
+        installments: filters.installments === 'all' ? undefined : filters.installments,
+        date_from: filters.dateFrom || undefined,
+        date_to: filters.dateTo || undefined,
+      }),
   })
 
   const del = useMutation({
     mutationFn: (id: string) => itemsApi.remove(id),
     onSuccess: (_data, id) => {
-      qc.invalidateQueries({ queryKey: ['items', month] })
+      qc.invalidateQueries({ queryKey: ['items'] })
       // Drop a deleted item from the selection so the count stays accurate.
       setSelected((prev) => {
         const next = new Set(prev)
@@ -171,7 +128,6 @@ export default function MonthView() {
     mutationFn: (input: BulkItemUpdateInput) => itemsApi.bulkUpdate(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['items'] })
-      qc.invalidateQueries({ queryKey: ['dashboard'] })
       qc.invalidateQueries({ queryKey: ['tags'] })
       qc.invalidateQueries({ queryKey: ['memory'] })
       setBulkOpen(false)
@@ -179,11 +135,36 @@ export default function MonthView() {
     },
   })
 
-  // Selection is scoped to what's currently visible: changing the month or any
-  // filter resets it (avoids accidentally bulk-editing hidden items).
+  // AI bulk tagging: enqueue a background batch, then jump to the review page
+  // where the proposals land (apply = add tags to the item).
+  const [aiTagError, setAiTagError] = useState('')
+  const tagWithAi = useMutation({
+    mutationFn: (ids: string[]) => aiTagsApi.createBatch(ids),
+    onSuccess: () => {
+      setSelected(new Set())
+      setAiTagError('')
+      navigate('/review')
+    },
+    onError: (e) => {
+      const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
+      setAiTagError(msg ?? 'falha ao enfileirar tags')
+    },
+  })
+
+  // Selection is scoped to what's currently visible: changing any filter resets
+  // it (avoids accidentally bulk-editing hidden items).
   useEffect(() => {
     setSelected(new Set())
-  }, [month, search, categoryId, tagFilter, bankFilter, kindFilter])
+  }, [
+    filters.search,
+    filters.categoryId,
+    filters.tagFilter,
+    filters.bankFilter,
+    filters.kindFilter,
+    filters.installments,
+    filters.dateFrom,
+    filters.dateTo,
+  ])
 
   const catById = new Map(categories.map((c) => [c.id, c]))
   const bankBySource = new Map(sources.map((s) => [s.id, s.bank]))
@@ -207,19 +188,9 @@ export default function MonthView() {
   const roots = items.filter((i) => i.parent_id === null)
   const rootIds = roots.map((r) => r.id)
   const allSelected = roots.length > 0 && roots.every((r) => selected.has(r.id))
-
-  const missingSources = (coverage?.sources ?? []).filter((s) => s.enabled && !s.present.includes(month))
-
-  const pieData = (dash?.by_category ?? []).map((c) => ({
-    name: c.name,
-    value: c.total_cents,
-    color: c.color,
-  }))
-  const lineData = trend.map((t) => ({
-    name: `${t.month.slice(5, 7)}/${t.month.slice(0, 4)}`,
-    Despesas: t.spend_cents,
-    Receitas: t.income_cents,
-  }))
+  const totalLabel = summary
+    ? `${summary.total_cents > 0 ? '+' : summary.total_cents < 0 ? '−' : ''}${fmtCents(summary.total_cents)}`
+    : '—'
 
   const renderSubItem = (c: Item) => (
     <div
@@ -293,6 +264,11 @@ export default function MonthView() {
           <span className="min-w-0 flex-1 truncate text-sm" title={it.description}>
             {itemTitle(it)}
           </span>
+          {it.installment_count != null && (
+            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+              {it.installment ?? '?'}/{it.installment_count}
+            </span>
+          )}
           {hasChildren && (
             <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
               {children.length} itens
@@ -423,190 +399,33 @@ export default function MonthView() {
     )
   }
 
+  const formMonth = form.parent
+    ? form.parent.occurred_on.slice(0, 7)
+    : form.editing
+      ? form.editing.occurred_on.slice(0, 7)
+      : currentMonth()
+
   return (
     <div className="pb-20">
-      <div className="mb-4 flex h-9 items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
-        <button
-          onClick={() => navigate(`/months/${shiftMonth(month, -1)}`)}
-          className="h-full px-3 text-base text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-        >
-          ‹
-        </button>
-        <span className="flex-1 text-center text-sm font-medium capitalize">
-          {monthLabel(month)}
-        </span>
-        <button
-          onClick={() => navigate(`/months/${shiftMonth(month, 1)}`)}
-          className="h-full px-3 text-base text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-        >
-          ›
-        </button>
+      <div className="mb-4 flex items-baseline gap-3">
+        <h1 className="text-xl font-bold">Lista</h1>
+        <p className="text-xs text-zinc-500">
+          Todo o histórico{summary ? ` — ${summary.count} itens` : ''}
+          {items.length >= LIST_LIMIT
+            ? ` (exibindo máx. ${LIST_LIMIT}; use os filtros para refinar)`
+            : ''}
+        </p>
       </div>
 
-      {missingSources.length > 0 && (
-        <div className="mb-4 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
-          Fontes faltando em {month}: {missingSources.map((s) => s.name).join(', ')}
-        </div>
-      )}
-
-      <div className="mb-4 rounded border border-zinc-800 bg-zinc-900">
-        <button
-          onClick={() => setGraphsOpen(!graphsOpen)}
-          className="flex w-full items-center gap-2 px-4 py-3 text-sm font-medium"
-        >
-          Gráficos
-          <span className="ml-auto text-zinc-500">{graphsOpen ? '▾' : '▸'}</span>
-        </button>
-        {graphsOpen && (
-          <div className="border-t border-zinc-800 p-4">
-            <div className="mb-4 grid grid-cols-4 gap-3">
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-                <p className="text-xs text-zinc-500">Despesas</p>
-                <p className="text-lg font-semibold tabular-nums">{fmtCents(dash?.total_spend_cents ?? 0)}</p>
-              </div>
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-                <p className="text-xs text-zinc-500">Receitas</p>
-                <p className="text-lg font-semibold tabular-nums text-emerald-400">
-                  {fmtCents(dash?.total_income_cents ?? 0)}
-                </p>
-              </div>
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-                <p className="text-xs text-zinc-500">Pendentes</p>
-                <p className="text-lg font-semibold tabular-nums text-amber-400">{dash?.pending_count ?? 0}</p>
-              </div>
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-                <p className="text-xs text-zinc-500">Recorrentes</p>
-                <p className="text-lg font-semibold tabular-nums text-cyan-400">{upcoming.length}</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
-                <h2 className="mb-2 text-sm font-medium text-zinc-400">Gastos por categoria</h2>
-                {pieData.length === 0 ? (
-                  <p className="py-8 text-center text-sm text-zinc-600">Sem dados</p>
-                ) : (
-                  <ResponsiveContainer width="100%" height={240}>
-                    <PieChart>
-                      <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={50} outerRadius={80} paddingAngle={2}>
-                        {pieData.map((entry, i) => (
-                          <Cell key={i} fill={entry.color || PIE_COLORS[i % PIE_COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(v) => fmtCents(Number(v))} />
-                      <Legend />
-                    </PieChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
-                <h2 className="mb-2 text-sm font-medium text-zinc-400">Últimos 12 meses</h2>
-                <ResponsiveContainer width="100%" height={240}>
-                  <LineChart data={lineData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                    <XAxis dataKey="name" tick={{ fontSize: 10 }} stroke="#52525b" />
-                    <YAxis tick={{ fontSize: 10 }} stroke="#52525b" tickFormatter={(v) => fmtShort(Number(v))} />
-                    <Tooltip formatter={(v) => fmtCents(Number(v))} />
-                    <Legend />
-                    <Line type="monotone" dataKey="Despesas" stroke="#f87171" dot={false} />
-                    <Line type="monotone" dataKey="Receitas" stroke="#34d399" dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {(dash?.top_merchants ?? []).length > 0 && (
-              <div className="mt-3 rounded border border-zinc-800 bg-zinc-950 p-4">
-                <h2 className="mb-2 text-sm font-medium text-zinc-400">Maiores comerciantes</h2>
-                <ul className="space-y-1">
-                  {dash!.top_merchants.map((m) => (
-                    <li key={m.merchant} className="flex items-center gap-3 text-sm">
-                      <span className="truncate">{m.merchant}</span>
-                      <span className="ml-auto tabular-nums">{fmtCents(m.total_cents)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Buscar…"
-          className="field w-64"
-        />
-        <button
-          onClick={() => setFiltersOpen(!filtersOpen)}
-          className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm leading-normal text-zinc-300 hover:bg-zinc-800"
-        >
-          Filtros
-          <span className="text-zinc-500">{filtersOpen ? '▾' : '▸'}</span>
-        </button>
-      </div>
-
-      {filtersOpen && (
-        <div className="mb-4 flex flex-wrap items-center gap-3">
-          <select
-            value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-            className="field w-full min-[480px]:w-44"
-          >
-            <option value="">Todas categorias</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          <select
-            value={tagFilter}
-            onChange={(e) => setTagFilter(e.target.value)}
-            className="field w-full min-[480px]:w-36"
-          >
-            <option value="">Todas tags</option>
-            {allTags.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-          <select
-            value={bankFilter}
-            onChange={(e) => setBankFilter(e.target.value)}
-            className="field w-full min-[480px]:w-36"
-          >
-            <option value="">Todos bancos</option>
-            {banks.map((b) => (
-              <option key={b} value={b}>
-                {b === 'nubank' ? 'Nubank' : b === 'c6' ? 'C6' : b === 'caixa' ? 'Caixa' : b}
-              </option>
-            ))}
-          </select>
-          <select
-            value={kindFilter}
-            onChange={(e) => setKindFilter(e.target.value)}
-            className="field w-full min-[480px]:w-36"
-          >
-            <option value="">Tipo: todos</option>
-            <option value="expense">Despesas</option>
-            <option value="income">Receitas</option>
-            <option value="internal">Internas</option>
-          </select>
-          <select
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value)}
-            className="field w-full min-[480px]:w-36"
-          >
-            <option value="date">Ordenar: data</option>
-            <option value="value">Ordenar: valor</option>
-          </select>
-        </div>
-      )}
+      <ItemFilters
+        value={filters}
+        onChange={setFilters}
+        categories={categories}
+        allTags={allTags}
+        banks={banks}
+        showSort
+        searchPlaceholder="Buscar em todo o histórico…"
+      />
 
       {selected.size > 0 && (
         <div className="fixed bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-full border border-zinc-700 bg-zinc-900/95 py-2 pl-5 pr-2 text-sm shadow-2xl shadow-black/50 backdrop-blur">
@@ -620,11 +439,24 @@ export default function MonthView() {
             Editar seleção
           </button>
           <button
+            onClick={() => tagWithAi.mutate([...selected])}
+            disabled={tagWithAi.isPending}
+            title="Enfileira a IA para sugerir tags para os itens selecionados (revise em Revisar)"
+            className="rounded-full border border-amber-500/60 px-3 py-1.5 text-sm font-medium text-amber-300 hover:bg-amber-500/10 disabled:opacity-50"
+          >
+            {tagWithAi.isPending ? 'Enfileirando…' : 'Taggear com IA'}
+          </button>
+          <button
             onClick={() => setSelected(new Set())}
             className="rounded-full px-3 py-1.5 text-sm text-zinc-400 hover:text-zinc-100"
           >
             Limpar
           </button>
+        </div>
+      )}
+      {aiTagError && (
+        <div className="fixed bottom-20 left-1/2 z-10 -translate-x-1/2 rounded border border-red-500/40 bg-red-950/90 px-4 py-2 text-sm text-red-300 shadow-xl">
+          {aiTagError}
         </div>
       )}
 
@@ -647,16 +479,24 @@ export default function MonthView() {
           )}
         </div>
         {listOpen && (
-          <div
-            className={`border-t border-zinc-800 px-2 py-2 transition-opacity ${isPlaceholderData ? 'opacity-60' : ''}`}
-          >
-            {isLoading ? (
-              <p className="px-2 text-zinc-500">carregando…</p>
-            ) : roots.length === 0 ? (
-              <p className="px-2 text-zinc-500">Nenhum item neste mês.</p>
-            ) : (
-              <div className="divide-y divide-zinc-900">{roots.map(renderRoot)}</div>
-            )}
+          <div className="border-t border-zinc-800">
+            <div className="flex items-center justify-between px-4 py-2 text-sm">
+              <span className="tabular-nums font-medium">Total: {totalLabel}</span>
+              <span className="text-xs text-zinc-500">
+                {summary ? `${summary.count} item${summary.count === 1 ? '' : 's'}` : ''}
+              </span>
+            </div>
+            <div
+              className={`px-2 py-2 transition-opacity ${isPlaceholderData ? 'opacity-60' : ''}`}
+            >
+              {isLoading ? (
+                <p className="px-2 text-zinc-500">carregando…</p>
+              ) : roots.length === 0 ? (
+                <p className="px-2 text-zinc-500">Nenhum item encontrado.</p>
+              ) : (
+                <div className="divide-y divide-zinc-900">{roots.map(renderRoot)}</div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -670,7 +510,7 @@ export default function MonthView() {
       )}
       {form.open && (
         <ItemForm
-          month={month}
+          month={formMonth}
           parent={form.parent}
           editing={form.editing}
           onClose={() => {

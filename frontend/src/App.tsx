@@ -2,7 +2,8 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { authApi } from './api/client'
 import Login from './pages/Login'
-import MonthView from './pages/MonthView'
+import Charts from './pages/Charts'
+import Lista from './pages/Lista'
 import Categories from './pages/Categories'
 import Upload from './pages/Upload'
 import Review from './pages/Review'
@@ -36,8 +37,8 @@ export default function App() {
         element={authed ? <Navigate to="/" replace /> : <Login />}
       />
       <Route element={authed ? <Layout /> : <Navigate to="/login" replace />}>
-        <Route path="/" element={<MonthView />} />
-        <Route path="/months/:ym" element={<MonthView />} />
+        <Route path="/" element={<Charts />} />
+        <Route path="/lista" element={<Lista />} />
         <Route path="/categories" element={<Categories />} />
         <Route path="/upload" element={<Upload />} />
         <Route path="/review" element={<Review />} />

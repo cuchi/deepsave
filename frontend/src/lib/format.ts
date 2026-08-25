@@ -11,3 +11,15 @@ export function currentMonth(): string {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
+
+/** First and last day (YYYY-MM-DD) of the previous calendar month. */
+export function lastCompleteMonthRange(): { from: string; to: string } {
+  const now = new Date()
+  const last = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  const lastDay = new Date(now.getFullYear(), now.getMonth(), 0).getDate()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return {
+    from: `${last.getFullYear()}-${pad(last.getMonth() + 1)}-01`,
+    to: `${last.getFullYear()}-${pad(last.getMonth() + 1)}-${pad(lastDay)}`,
+  }
+}

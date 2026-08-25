@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod ai_tags;
 pub mod categories;
 pub mod dashboard;
 pub mod documents;

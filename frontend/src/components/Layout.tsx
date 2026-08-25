@@ -21,7 +21,10 @@ export default function Layout() {
           </Link>
           <nav className="flex gap-4 text-sm text-zinc-400">
             <Link to="/" className="hover:text-zinc-100">
-              Início
+              Gráficos
+            </Link>
+            <Link to="/lista" className="hover:text-zinc-100">
+              Lista
             </Link>
             <Link to="/upload" className="hover:text-zinc-100">
               Upload

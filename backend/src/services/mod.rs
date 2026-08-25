@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod ai_tags;
 pub mod extract;
 pub mod ingest;
 pub mod linking;

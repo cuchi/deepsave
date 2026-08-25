@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/* Render native controls (date-picker calendar icon, select dropdowns,
+   scrollbars) in dark mode so they match the zinc-950 theme instead of
+   showing light-on-dark artifacts. */
+:root {
+  color-scheme: dark;
+}
+
 @layer components {
   .field {
     width: 100%;

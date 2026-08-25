@@ -100,6 +100,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let ai = AiClient::new(&config, pool.clone());
     tokio::spawn(services::queue::run_worker(pool.clone(), ai.clone()));
+    tokio::spawn(services::ai_tags::run_worker(pool.clone(), ai.clone()));
     tokio::spawn(services::sources::backfill_null_sources(pool.clone()));
     {
         let pool = pool.clone();
@@ -137,11 +138,18 @@ pub async fn run() -> anyhow::Result<()> {
             get(routes::items::list).post(routes::items::create),
         )
         .route("/items/bulk", patch(routes::items::bulk_update))
+        .route("/items/summary", get(routes::items::items_summary))
         .route("/tags", get(routes::tags::list))
         .route("/tags/usage", get(routes::tags::usage))
         .route("/tags/rename", patch(routes::tags::rename))
         .route("/tags/merge", post(routes::tags::merge))
         .route("/tags/{tag}", delete(routes::tags::delete_tag))
+        .route("/ai-tags/batches", post(routes::ai_tags::create_batch).get(routes::ai_tags::list_batches))
+        .route("/ai-tags/suggestions", get(routes::ai_tags::list_suggestions))
+        .route("/ai-tags/suggestions/{id}/apply", post(routes::ai_tags::apply))
+        .route("/ai-tags/suggestions/{id}/dismiss", post(routes::ai_tags::dismiss))
+        .route("/ai-tags/suggestions/apply-all", post(routes::ai_tags::apply_all))
+        .route("/ai-tags/suggestions/dismiss-all", post(routes::ai_tags::dismiss_all))
         .route(
             "/items/{id}",
             get(routes::items::get)
