@@ -17,7 +17,7 @@ docker exec -i "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 
 BEGIN;
 
 -- Reset data tables (keep schema + migrations).
-TRUNCATE TABLE matches, merchant_memory, items, recurring_rules, documents, ai_calls, accounts, categories CASCADE;
+TRUNCATE TABLE matches, merchant_memory, items, recurring_rules, recurring_aliases, documents, ai_calls, accounts, categories CASCADE;
 
 -- ===== Categories =====
 INSERT INTO categories (id, name, color) VALUES
@@ -36,11 +36,17 @@ INSERT INTO accounts (id, name, bank, account_number) VALUES
   ('00000000-0000-0000-0000-000000000202', 'Caixa',  'Caixa Econômica Federal', '5678-9'),
   ('00000000-0000-0000-0000-000000000203', 'C6',     'C6 Bank', '9012-3');
 
--- ===== Recurring rules =====
-INSERT INTO recurring_rules (id, merchant, description, amount_cents, currency, category_id, tags, frequency, interval, day_of_month, next_due_on, is_active, source) VALUES
-  ('00000000-0000-0000-0000-000000000401', 'Spotify', 'Spotify Premium', -2190, 'BRL', '00000000-0000-0000-0000-000000000107', ARRAY['streaming'], 'monthly', 1, 15, (date_trunc('month', now()) + interval '1 month' + interval '14 days')::date, true, 'manual'),
-  ('00000000-0000-0000-0000-000000000402', 'Netflix', 'Netflix', -5590, 'BRL', '00000000-0000-0000-0000-000000000106', ARRAY['streaming'], 'monthly', 1, 20, (date_trunc('month', now()) + interval '1 month' + interval '19 days')::date, true, 'manual'),
-  ('00000000-0000-0000-0000-000000000403', 'Academia Smart Fit', 'Academia Smart Fit', -9990, 'BRL', '00000000-0000-0000-0000-000000000104', ARRAY['academia'], 'monthly', 1, 5, (date_trunc('month', now()) + interval '1 month' + interval '4 days')::date, true, 'manual');
+-- ===== Recurring rules (name is a free-form label; matching is via aliases) =====
+INSERT INTO recurring_rules (id, name, amount_cents, currency, category_id, frequency, interval, day_of_month, next_due_on, is_active, source) VALUES
+  ('00000000-0000-0000-0000-000000000401', 'Spotify Premium', -2190, 'BRL', '00000000-0000-0000-0000-000000000107', 'monthly', 1, 15, (date_trunc('month', now()) + interval '1 month' + interval '14 days')::date, true, 'manual'),
+  ('00000000-0000-0000-0000-000000000402', 'Netflix', -5590, 'BRL', '00000000-0000-0000-0000-000000000106', 'monthly', 1, 20, (date_trunc('month', now()) + interval '1 month' + interval '19 days')::date, true, 'manual'),
+  ('00000000-0000-0000-0000-000000000403', 'Academia Smart Fit', -9990, 'BRL', '00000000-0000-0000-0000-000000000104', 'monthly', 1, 5, (date_trunc('month', now()) + interval '1 month' + interval '4 days')::date, true, 'manual');
+
+-- ===== Recurring aliases (normalized, auto-match) =====
+INSERT INTO recurring_aliases (rule_id, name, is_alias) VALUES
+  ('00000000-0000-0000-0000-000000000401', 'spotify', true),
+  ('00000000-0000-0000-0000-000000000402', 'netflix', true),
+  ('00000000-0000-0000-0000-000000000403', 'academia smart fit', true);
 
 -- ===== Items (tree) =====
 -- Columns: id, parent_id, source, kind, status, account_id, transfer_group_id,

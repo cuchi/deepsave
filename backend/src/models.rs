@@ -283,8 +283,8 @@ pub struct SuggestionDetail {
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct RecurringRule {
     pub id: Uuid,
-    pub merchant: Option<String>,
-    pub description: String,
+    /// Free-form label — plays no role in matching.
+    pub name: String,
     pub amount_cents: i64,
     pub currency: String,
     pub category_id: Option<Uuid>,
@@ -292,9 +292,21 @@ pub struct RecurringRule {
     pub frequency: String,
     pub interval: i32,
     pub day_of_month: Option<i32>,
+    /// Effective next due date (never in the past) — computed at read time.
     pub next_due_on: Option<NaiveDate>,
     pub is_active: bool,
     pub source: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Auto-match names (normalized exact equality against item merchant/description).
+    pub aliases: Vec<String>,
+    /// One-shot manual references (no auto-match; linked at save time).
+    pub isolated_cases: Vec<String>,
+    /// Derived from linked confirmed items (union of their tags).
+    pub tags: Vec<String>,
+    /// True when linked items carry more than one distinct non-empty tag set.
+    pub tags_conflict: bool,
+    /// Days until the effective next due date (negative only if already past —
+    /// shouldn't happen; read-time advance keeps it >= 0).
+    pub days_until: Option<i64>,
 }

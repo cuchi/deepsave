@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Full backup of DeepSave's Postgres database + uploaded files (appdata volume).
+# Run from the host:  ./scripts/backup
+#
+# The postgres container must be up:  docker compose up -d postgres
+#
+# Output (both optional to override):
+#   ./backups/deepsave-<timestamp>.dump            DB, pg_dump -F c (compressed)
+#   ./backups/deepsave-<timestamp>-appdata.tar.gz  uploaded statements/receipts
+#
+# Overridable via env vars, e.g.:
+#   DEEPSAVE_BACKUP_DIR=/srv/backups
+#   DEEPSAVE_PG_CONTAINER=my-pg
+#   DEEPSAVE_PG_USER=deepsave
+#   DEEPSAVE_PG_DB=deepsave
+#   DEEPSAVE_APPDATA_VOLUME=deepsave_appdata   # set to "" to skip storage backup
+
+set -euo pipefail
+
+CONTAINER="${DEEPSAVE_PG_CONTAINER:-deepsave-postgres}"
+DB_USER="${DEEPSAVE_PG_USER:-deepsave}"
+DB_NAME="${DEEPSAVE_PG_DB:-deepsave}"
+APPDATA_VOLUME="${DEEPSAVE_APPDATA_VOLUME:-deepsave_appdata}"
+
+OUT_DIR="$(mkdir -p "${DEEPSAVE_BACKUP_DIR:-./backups}" && cd "${DEEPSAVE_BACKUP_DIR:-./backups}" && pwd)"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+DUMP="$OUT_DIR/deepsave-$STAMP.dump"
+
+echo "== backing up database '$DB_NAME' from container '$CONTAINER' =="
+docker exec "$CONTAINER" pg_dump -U "$DB_USER" -d "$DB_NAME" -F c > "$DUMP"
+echo "  DB -> $DUMP ($(du -h "$DUMP" | cut -f1))"
+
+if [[ -n "$APPDATA_VOLUME" ]] && docker volume inspect "$APPDATA_VOLUME" >/dev/null 2>&1; then
+  TAR="$OUT_DIR/deepsave-$STAMP-appdata.tar.gz"
+  docker run --rm -v "$APPDATA_VOLUME":/data -v "$OUT_DIR":/backup alpine \
+    tar czf "/backup/$(basename "$TAR")" -C /data . >/dev/null
+  echo "  FS -> $TAR ($(du -h "$TAR" | cut -f1))"
+elif [[ -n "$APPDATA_VOLUME" ]]; then
+  echo "  ! volume '$APPDATA_VOLUME' not found; skipping uploaded-files backup"
+  echo "    (list volumes with: docker volume ls)"
+else
+  echo "  ! DEEPSAVE_APPDATA_VOLUME is empty; skipping uploaded-files backup"
+fi
+
+echo "Done."

@@ -54,7 +54,6 @@ async fn apply_rename(
     Ok(Json(json!({
         "ok": true,
         "items_updated": res.items_updated,
-        "recurring_updated": res.recurring_updated,
         "memory_updated": res.memory_updated,
     })))
 }
@@ -85,7 +84,6 @@ pub async fn delete_tag(
     Ok(Json(json!({
         "ok": true,
         "items_updated": res.items_updated,
-        "recurring_updated": res.recurring_updated,
         "memory_updated": res.memory_updated,
     })))
 }

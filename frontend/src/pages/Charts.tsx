@@ -466,10 +466,12 @@ export default function Charts() {
       }),
   })
 
-  const { data: upcoming = [] } = useQuery({
-    queryKey: ['recurring-upcoming'],
-    queryFn: recurringApi.upcoming,
+  const { data: recurring = [] } = useQuery({
+    queryKey: ['recurring'],
+    queryFn: recurringApi.list,
   })
+  // Count of active rules with a scheduled next date (forecast).
+  const upcomingCount = recurring.filter((r) => r.is_active && r.next_due_on).length
 
   const banks = [...new Set(sources.map((s) => s.bank))].sort()
 
@@ -542,7 +544,7 @@ export default function Charts() {
               </div>
               <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
                 <p className="text-xs text-zinc-500">Recorrentes</p>
-                <p className="text-lg font-semibold tabular-nums text-cyan-400">{upcoming.length}</p>
+                <p className="text-lg font-semibold tabular-nums text-cyan-400">{upcomingCount}</p>
               </div>
             </div>
 

@@ -54,6 +54,26 @@ Runs from the host via `docker exec` into the Postgres container (override the
 container name with `DEEPSEED_PG_CONTAINER` if needed). Re-running it resets and
 re-seeds the data tables.
 
+## Backup & restore
+
+Postgres runs in the `deepsave-postgres` container (user/db `deepsave`); uploaded
+statements/receipts live in the `appdata` volume (`/app/storage`), **not** in the
+database.
+
+Full backup (DB dump + uploaded files) and restore:
+
+```bash
+./scripts/backup                 # writes ./backups/deepsave-<timestamp>.dump (+ -appdata.tar.gz)
+./scripts/restore                # restores the most recent backup; or pass a timestamp:
+./scripts/restore 20250101-120000
+```
+
+Both accept `DEEPSAVE_BACKUP_DIR`, `DEEPSAVE_PG_CONTAINER`, `DEEPSAVE_PG_USER`,
+`DEEPSAVE_PG_DB`, `DEEPSAVE_APPDATA_VOLUME` env overrides (see headers in the
+scripts). Restore **overwrites** the current database and restarts the app.
+
+## Login (dev)
+
 ## Login (dev)
 
 If `APP_PASSWORD_HASH`/`APP_PASSWORD` are not set, the default password is `deepsave`.

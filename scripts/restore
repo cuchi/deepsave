@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Restore a backup created by ./scripts/backup.
+# Run from the host:  ./scripts/restore [timestamp]
+#
+# With no argument, restores the most recent backup found in ./backups/.
+# With an argument, restores deepsave-<timestamp>.dump (and, if present,
+# deepsave-<timestamp>-appdata.tar.gz).
+#
+# The postgres container must be up and healthy:  docker compose up -d postgres
+# WARNING: this overwrites the current database (--clean drops existing objects).
+#
+# Overridable via env vars, e.g.:
+#   DEEPSAVE_BACKUP_DIR=/srv/backups
+#   DEEPSAVE_PG_CONTAINER=my-pg
+#   DEEPSAVE_PG_USER=deepsave
+#   DEEPSAVE_PG_DB=deepsave
+#   DEEPSAVE_APPDATA_VOLUME=deepsave_appdata
+#   DEEPSAVE_APP_CONTAINER=deepsave-app
+
+set -euo pipefail
+
+CONTAINER="${DEEPSAVE_PG_CONTAINER:-deepsave-postgres}"
+DB_USER="${DEEPSAVE_PG_USER:-deepsave}"
+DB_NAME="${DEEPSAVE_PG_DB:-deepsave}"
+APPDATA_VOLUME="${DEEPSAVE_APPDATA_VOLUME:-deepsave_appdata}"
+APP="${DEEPSAVE_APP_CONTAINER:-deepsave-app}"
+
+OUT_DIR="$(cd "${DEEPSAVE_BACKUP_DIR:-./backups}" && pwd)"
+STAMP="${1:-}"
+if [[ -z "$STAMP" ]]; then
+  STAMP="$(ls -1 "$OUT_DIR"/deepsave-*.dump 2>/dev/null | sort | tail -1 | sed 's#.*/deepsave-##; s#\.dump$##')"
+fi
+DUMP="$OUT_DIR/deepsave-$STAMP.dump"
+TAR="$OUT_DIR/deepsave-$STAMP-appdata.tar.gz"
+
+if [[ -z "$STAMP" || ! -f "$DUMP" ]]; then
+  echo "No backup found in $OUT_DIR (looked for deepsave-<timestamp>.dump)." >&2
+  echo "Usage: $0 [timestamp]" >&2
+  exit 1
+fi
+
+echo "== restoring database '$DB_NAME' from $DUMP =="
+docker exec "$CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null \
+  || { echo "Postgres is not ready in container '$CONTAINER'." >&2; exit 1; }
+docker exec -i "$CONTAINER" pg_restore -U "$DB_USER" -d "$DB_NAME" --clean --if-exists < "$DUMP"
+echo "  DB restored."
+
+if [[ -f "$TAR" ]]; then
+  echo "== restoring uploaded files from $TAR =="
+  if docker volume inspect "$APPDATA_VOLUME" >/dev/null 2>&1; then
+    docker run --rm -v "$APPDATA_VOLUME":/data -v "$OUT_DIR":/backup alpine \
+      tar xzf "/backup/$(basename "$TAR")" -C /data
+    echo "  Files restored into volume '$APPDATA_VOLUME'."
+  else
+    echo "  ! volume '$APPDATA_VOLUME' not found; skipping (recreate it, e.g. docker volume create)." >&2
+  fi
+else
+  echo "  (no matching appdata archive; uploaded files left untouched)"
+fi
+
+echo "== restarting app container '$APP' =="
+docker restart "$APP" >/dev/null
+echo "Done."

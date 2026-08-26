@@ -6,11 +6,12 @@ import {
   categoriesApi,
   documentsApi,
   itemsApi,
+  recurringApi,
   sourcesApi,
   tagsApi,
   type BulkItemUpdateInput,
 } from '../api/client'
-import type { Item } from '../lib/types'
+import type { Item, RecurringRule } from '../lib/types'
 import { currentMonth, fmtCents } from '../lib/format'
 import ItemForm from '../components/ItemForm'
 import BulkEditModal from '../components/BulkEditModal'
@@ -65,6 +66,8 @@ export default function Lista() {
   const { filters, setFilters } = useFiltersUrl()
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [detailsFor, setDetailsFor] = useState<string | null>(null)
+  const [linkFor, setLinkFor] = useState<string | null>(null)
+  const [linkQuery, setLinkQuery] = useState('')
   const [listOpen, setListOpen] = useState(true)
   const qc = useQueryClient()
 
@@ -72,6 +75,7 @@ export default function Lista() {
   const { data: sources = [] } = useQuery({ queryKey: ['sources'], queryFn: sourcesApi.list })
   const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: tagsApi.list })
   const { data: docs = [] } = useQuery({ queryKey: ['documents'], queryFn: documentsApi.list })
+  const { data: rules = [] } = useQuery({ queryKey: ['recurring'], queryFn: recurringApi.list })
 
   const { data: items = [], isLoading, isPlaceholderData } = useQuery({
     queryKey: ['items', 'all', filters],
@@ -121,6 +125,22 @@ export default function Lista() {
       })
     },
   })
+
+  const linkRecurring = useMutation({
+    mutationFn: (v: { id: string; ruleId: string | null }) =>
+      itemsApi.linkRecurring(v.id, v.ruleId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['recurring'] })
+      setLinkFor(null)
+    },
+  })
+
+  const openLinkPicker = (id: string) => {
+    setMenuFor(null)
+    setLinkQuery('')
+    setLinkFor(id)
+  }
 
   const bulk = useMutation({
     mutationFn: (input: BulkItemUpdateInput) => itemsApi.bulkUpdate(input),
@@ -277,6 +297,15 @@ export default function Lista() {
               {kindLabel}
             </span>
           )}
+          {it.recurring_id && (
+            <button
+              onClick={() => navigate('/recurring')}
+              className="shrink-0 rounded bg-sky-950 px-1.5 py-0.5 text-[10px] text-sky-300 hover:bg-sky-900"
+              title="Vinculado a uma regra recorrente (abrir Recorrentes)"
+            >
+              ↻ recorrente
+            </button>
+          )}
           {cat && (
             <span className="flex shrink-0 items-center gap-1 text-xs text-zinc-400">
               {cat.color && <span className="h-2 w-2 rounded-full" style={{ background: cat.color }} />}
@@ -343,6 +372,23 @@ export default function Lista() {
                   Adicionar sub-item
                 </button>
                 <button
+                  onClick={() => openLinkPicker(it.id)}
+                  className="block w-full px-3 py-1.5 text-left text-sm hover:bg-zinc-800"
+                >
+                  {it.recurring_id ? 'Trocar regra recorrente…' : 'Vincular a regra…'}
+                </button>
+                {it.recurring_id && (
+                  <button
+                    onClick={() => {
+                      setMenuFor(null)
+                      linkRecurring.mutate({ id: it.id, ruleId: null })
+                    }}
+                    className="block w-full px-3 py-1.5 text-left text-sm hover:bg-zinc-800"
+                  >
+                    Desvincular da regra
+                  </button>
+                )}
+                <button
                   onClick={() => {
                     setMenuFor(null)
                     del.mutate(it.id)
@@ -351,6 +397,38 @@ export default function Lista() {
                 >
                   Apagar
                 </button>
+              </div>
+            </>
+          )}
+
+          {linkFor === it.id && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setLinkFor(null)} />
+              <div className="absolute right-0 top-full z-20 mt-1 w-64 rounded border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
+                <input
+                  value={linkQuery}
+                  onChange={(e) => setLinkQuery(e.target.value)}
+                  placeholder="Buscar regra…"
+                  autoFocus
+                  className="mx-2 mb-1 w-[calc(100%-16px)] rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm outline-none focus:border-zinc-500"
+                />
+                <button
+                  onClick={() => linkRecurring.mutate({ id: it.id, ruleId: null })}
+                  className="block w-full px-3 py-1.5 text-left text-sm text-zinc-500 hover:bg-zinc-800"
+                >
+                  Sem regra (desvincular)
+                </button>
+                {rules
+                  .filter((r) => r.name.toLowerCase().includes(linkQuery.toLowerCase()))
+                  .map((r: RecurringRule) => (
+                    <button
+                      key={r.id}
+                      onClick={() => linkRecurring.mutate({ id: it.id, ruleId: r.id })}
+                      className="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-zinc-800"
+                    >
+                      {r.name}
+                    </button>
+                  ))}
               </div>
             </>
           )}

@@ -138,6 +138,7 @@ pub async fn run() -> anyhow::Result<()> {
             get(routes::items::list).post(routes::items::create),
         )
         .route("/items/bulk", patch(routes::items::bulk_update))
+        .route("/items/link-recurring", post(routes::items::bulk_link_recurring))
         .route("/items/summary", get(routes::items::items_summary))
         .route("/tags", get(routes::tags::list))
         .route("/tags/usage", get(routes::tags::usage))
@@ -158,6 +159,7 @@ pub async fn run() -> anyhow::Result<()> {
         )
         .route("/items/{id}/confirm", post(routes::items::confirm))
         .route("/items/{id}/reject", post(routes::items::reject))
+        .route("/items/{id}/link-recurring", post(routes::items::link_recurring))
         .route("/items/{id}/apply-memory", post(routes::items::apply_memory))
         .route("/items/{id}/accept-suggestion", post(routes::items::accept_suggestion))
         .route("/memory", get(routes::memory::list_memory).post(routes::memory::create_memory))
@@ -175,8 +177,9 @@ pub async fn run() -> anyhow::Result<()> {
             "/recurring/{id}",
             patch(routes::recurring::update).delete(routes::recurring::delete),
         )
-        .route("/recurring/upcoming", get(routes::recurring::upcoming))
-        .route("/recurring/suggestions", get(routes::recurring::suggestions))
+        .route("/recurring/{id}/occurrences", get(routes::recurring::occurrences))
+        .route("/recurring/merchants", get(routes::recurring::merchants))
+        .route("/recurring/merchant-profile", get(routes::recurring::merchant_profile))
         .route(
             "/documents",
             get(routes::documents::list)
@@ -200,6 +203,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/sources", get(routes::sources::list))
         .route("/sources/{id}", patch(routes::sources::update))
         .route("/coverage", get(routes::sources::coverage))
+        .route("/system", get(routes::system::system))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

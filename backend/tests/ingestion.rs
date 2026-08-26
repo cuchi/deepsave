@@ -166,3 +166,93 @@ async fn image_ingestion_uses_mocked_vision(pool: PgPool) {
     assert_eq!(model, "deepseek-v4-flash-vision-exp");
     assert_eq!(status, "ok");
 }
+
+#[sqlx::test]
+async fn reclassify_marks_equal_amount_transfer_pairs_internal(pool: PgPool) {
+    common::migrate(&pool).await;
+
+    // Own-account transfer pair: out (Nubank) + in (C6), same amount, same day.
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
+         VALUES ('bank_statement','expense','confirmed','2026-04-09',
+                 'Transferência enviada pelo Pix - PAULO HENRIQUE CUCHI - BCO C6 S.A. Conta: 24894407-0', -10000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
+         VALUES ('bank_statement','income','confirmed','2026-04-09',
+                 'Pix recebido de Paulo Henrique Cuchi', 10000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Same amount but a genuine third-party payment: must NOT be paired.
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
+         VALUES ('bank_statement','expense','confirmed','2026-04-09',
+                 'Transferência enviada pelo Pix - IFOOD.COM', -10000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Same amount + same day but DIFFERENT counterparty: not a pair.
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
+         VALUES ('bank_statement','expense','confirmed','2026-04-09',
+                 'Transferência enviada pelo Pix - PEDRO DE LIMA JUNIOR', -10000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // A reembolso (refund) is not an internal transfer either.
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
+         VALUES ('bank_statement','income','confirmed','2026-02-05',
+                 'Reembolso recebido pelo Pix - CLINICA MOTIVATION MEDICINA', 16000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
+         VALUES ('bank_statement','expense','confirmed','2026-02-05',
+                 'Transferência enviada pelo Pix - CLINICA MOTIVATION NUTRICAO', -16000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let updated = ingest::reclassify_pix_as_internal(&pool).await.unwrap();
+    assert_eq!(updated, 2, "only the own-account pair changes");
+
+    let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM items")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let mut counts = [0usize; 3];
+    for k in &kinds {
+        match k.as_str() {
+            "internal" => counts[0] += 1,
+            "expense" => counts[1] += 1,
+            "income" => counts[2] += 1,
+            _ => panic!("unexpected kind {k}"),
+        }
+    }
+    assert_eq!(counts, [2, 3, 1], "only the own-account pair becomes internal");
+
+    // Both sides of the pair share a transfer group.
+    let groups: Vec<Option<uuid::Uuid>> = sqlx::query_scalar(
+        "SELECT transfer_group_id FROM items WHERE kind = 'internal' ORDER BY description",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0], groups[1]);
+    assert!(groups[0].is_some());
+}

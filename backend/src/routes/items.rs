@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::models::{BulkItemUpdate, Item, ItemInput, ItemSummary, TagsMode};
-use crate::services::{memory, tags};
+use crate::services::{memory, recurring, tags};
 use crate::AppState;
 
 pub(crate) const ITEM_COLS: &str = "id, parent_id, document_id, source, kind, status, account_id, \
@@ -458,6 +458,9 @@ pub async fn confirm(
         .execute(&state.pool)
         .await?;
 
+    // Auto-link to a recurring rule whose alias matches this item.
+    recurring::link_item(&state.pool, id).await?;
+
     // Strengthen the categorization memory on confirmation (tags accumulate).
     if let Some(m) = &merchant {
         memory::record_confirmation(&state.pool, m, category_id, &item_tags).await?;
@@ -476,6 +479,86 @@ pub async fn reject(
 ) -> Result<Json<serde_json::Value>, AppError> {
     set_item_status(&state, id, "rejected").await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---------- Recurring-rule manual linking ----------
+
+#[derive(Debug, Deserialize)]
+pub struct LinkRecurringInput {
+    #[serde(default)]
+    pub rule_id: Option<Uuid>,
+}
+
+/// Link a single item to a recurring rule by hand (`rule_id: null` unlinks).
+/// Manual links are never touched by auto-relink.
+pub async fn link_recurring(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<LinkRecurringInput>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_rule_and_item(&state.pool, input.rule_id, Some(id)).await?;
+    set_item_link(&state.pool, &[id], input.rule_id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkLinkRecurringInput {
+    pub ids: Vec<Uuid>,
+    #[serde(default)]
+    pub rule_id: Option<Uuid>,
+}
+
+/// Link many items to a rule at once (e.g. several PIX lines). `rule_id: null` unlinks.
+pub async fn bulk_link_recurring(
+    State(state): State<AppState>,
+    Json(input): Json<BulkLinkRecurringInput>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if input.ids.is_empty() {
+        return Err(AppError::bad_request("ids vazio"));
+    }
+    ensure_rule_and_item(&state.pool, input.rule_id, None).await?;
+    let res = set_item_link(&state.pool, &input.ids, input.rule_id).await?;
+    Ok(Json(json!({ "ok": true, "updated": res })))
+}
+
+async fn ensure_rule_and_item(
+    pool: &PgPool,
+    rule_id: Option<Uuid>,
+    item_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    if let Some(rid) = rule_id {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM recurring_rules WHERE id = $1)")
+                .bind(rid)
+                .fetch_one(pool)
+                .await?;
+        if !exists {
+            return Err(AppError::not_found("regra recorrente não encontrada"));
+        }
+    }
+    if let Some(iid) = item_id {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items WHERE id = $1)")
+            .bind(iid)
+            .fetch_one(pool)
+            .await?;
+        if !exists {
+            return Err(AppError::not_found("item não encontrado"));
+        }
+    }
+    Ok(())
+}
+
+async fn set_item_link(pool: &PgPool, ids: &[Uuid], rule_id: Option<Uuid>) -> Result<u64, AppError> {
+    let res = sqlx::query(
+        "UPDATE items SET recurring_id = $1, linked_manually = $2, updated_at = now()
+         WHERE id = ANY($3)",
+    )
+    .bind(rule_id)
+    .bind(rule_id.is_some())
+    .bind(ids)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
 }
 
 /// Apply the remembered category + tags for this item's merchant (one-click).

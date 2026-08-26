@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::models::DocumentRow;
 use crate::services::ai::{self, AiClient, AiExtraction};
 use crate::services::parsers::{caixa_card, csv, ParsedItem};
-use crate::services::{extract, linking, tags};
+use crate::services::{extract, linking, recurring, tags};
 
 /// Process a single document based on its file type.
 ///
@@ -52,7 +52,8 @@ async fn process_csv(pool: &PgPool, doc: &DocumentRow) -> Result<()> {
     let items = csv::parse_csv(&content, billing_month).context("failed to parse csv")?;
 
     let source = statement_source(doc);
-    insert_parsed_items(pool, doc, source, &items).await?;
+    let ids = insert_parsed_items(pool, doc, source, &items).await?;
+    link_new_items(pool, &ids).await?;
 
     sqlx::query("UPDATE documents SET status = 'processed', processed_at = now() WHERE id = $1")
         .bind(doc.id)
@@ -61,11 +62,20 @@ async fn process_csv(pool: &PgPool, doc: &DocumentRow) -> Result<()> {
     Ok(())
 }
 
-/// Reclassify bank-statement Pix/ENVIO expenses that match a known internal
-/// movement (same |amount|, within a few days) as `internal` — e.g. a Pix
-/// paying a credit-card bill, or the other side of an own-account transfer.
-/// They are tracked but must not count as expenses.
+/// Reclassify bank-statement Pix/ENVIO expenses that are actually internal
+/// movements (transfers between own accounts, card-bill payments) as `internal`:
+/// they are tracked but must not count as expenses.
+///
+/// Two passes:
+/// 1. expense matching an already-`internal` item (same |amount|, ±5 days);
+/// 2. **transfer pairs**: transfer-out expense ↔ transfer-in income with equal
+///    |amount| (±5 days) — both sides become `internal` and share a
+///    `transfer_group_id`. Catches cross-statement pairs that a per-document
+///    pass (e.g. during recovery) could not see.
 pub async fn reclassify_pix_as_internal(pool: &PgPool) -> Result<usize> {
+    let mut updated = 0;
+
+    // --- Pass 1 (existing behavior): Pix/ENVIO expenses matching an internal ---
     let internals: Vec<(i64, NaiveDate)> = sqlx::query_as(
         "SELECT abs(amount_cents), occurred_on FROM items WHERE kind = 'internal'",
     )
@@ -80,23 +90,124 @@ pub async fn reclassify_pix_as_internal(pool: &PgPool) -> Result<usize> {
     .fetch_all(pool)
     .await?;
 
-    let mut updated = 0;
-    for (id, amount, date, description) in expenses {
+    for (id, amount, date, description) in &expenses {
         let lower = description.to_lowercase();
         if !(lower.contains("pix") || lower.contains("envio")) {
             continue;
         }
         if internals.iter().any(|(cp_amount, cp_date)| {
-            *cp_amount == amount && (date - *cp_date).num_days().abs() <= 5
+            *cp_amount == *amount && (*date - *cp_date).num_days().abs() <= 5
         }) {
-            sqlx::query("UPDATE items SET kind = 'internal', updated_at = now() WHERE id = $1")
-                .bind(id)
-                .execute(pool)
-                .await?;
-            updated += 1;
+            updated += mark_internal(pool, *id, None).await?;
         }
     }
+
+    // --- Pass 2: equal-|amount| transfer pairs (out ↔ in, ±5 days) ---
+    // Transfer-out expenses (still expenses after pass 1):
+    let outs: Vec<(Uuid, i64, NaiveDate, String)> = sqlx::query_as(
+        "SELECT id, abs(amount_cents), occurred_on, COALESCE(description, '')
+         FROM items
+         WHERE kind = 'expense' AND source = 'bank_statement'",
+    )
+    .fetch_all(pool)
+    .await?;
+    // Transfer-in incomes:
+    let ins: Vec<(Uuid, i64, NaiveDate, String)> = sqlx::query_as(
+        "SELECT id, abs(amount_cents), occurred_on, COALESCE(description, '')
+         FROM items
+         WHERE kind = 'income' AND source = 'bank_statement'",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut used_ins: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for (out_id, amount, date, out_desc) in &outs {
+        let lower = out_desc.to_lowercase();
+        if !(lower.contains("pix") || lower.contains("envio")) {
+            continue;
+        }
+        let Some(out_party) = transfer_counterparty(out_desc) else {
+            continue;
+        };
+        let best = ins
+            .iter()
+            .filter(|(in_id, i_amount, i_date, i_desc)| {
+                !used_ins.contains(in_id)
+                    && *i_amount == *amount
+                    && (*date - *i_date).num_days().abs() <= 5
+                    && is_transfer_in(i_desc)
+                    && !i_desc.to_lowercase().contains("reembolso")
+                    && transfer_counterparty(i_desc).as_deref() == Some(out_party.as_str())
+            })
+            .min_by_key(|(_, _, i_date, _)| (*date - *i_date).num_days().abs());
+        if let Some((in_id, _, _, _)) = best {
+            used_ins.insert(*in_id);
+            let group = Uuid::new_v4();
+            updated += mark_internal(pool, *out_id, Some(group)).await?;
+            updated += mark_internal(pool, *in_id, Some(group)).await?;
+        }
+    }
+
     Ok(updated)
+}
+
+/// A transfer-in income: Pix recebido / Transferência recebida.
+fn is_transfer_in(description: &str) -> bool {
+    let lower = description.to_lowercase();
+    lower.contains("recebida") || lower.contains("recebido")
+}
+
+/// Extract the counterparty from a bank-statement transfer description, e.g.
+/// "Transferência enviada pelo Pix - PAULO HENRIQUE CUCHI - BCO C6 …" →
+/// "paulo henrique cuchi"; "Pix recebido de Paulo Henrique Cuchi" →
+/// "paulo henrique cuchi". Normalized (accent-stripped, lowercased).
+fn transfer_counterparty(description: &str) -> Option<String> {
+    let d = description.trim();
+    let d_lower = d.to_lowercase();
+    // "…pix - <NAME> - <BANK>" (also covers "pix - <NAME>" with no bank part).
+    if let Some(idx) = d_lower.find("pix - ") {
+        let rest = d[idx + 6..].trim();
+        let name = rest.split(" - ").next().unwrap_or(rest).trim();
+        if !name.is_empty() {
+            return Some(crate::services::tags::strip_accents(name).to_lowercase());
+        }
+    }
+    // "Pix enviado para <NAME>" / "Pix recebido de <NAME>"
+    for kw in ["para ", "de "] {
+        if let Some(idx) = d_lower.find(kw) {
+            let name = d[idx + kw.len()..].trim();
+            if !name.is_empty() {
+                return Some(crate::services::tags::strip_accents(name).to_lowercase());
+            }
+        }
+    }
+    None
+}
+
+/// Mark an item `internal`, optionally assigning a transfer group (1:1 pairs).
+/// Skips items already internal; returns rows actually changed.
+async fn mark_internal(pool: &PgPool, id: Uuid, group: Option<Uuid>) -> Result<usize> {
+    let affected = if let Some(g) = group {
+        sqlx::query(
+            "UPDATE items SET kind = 'internal', transfer_group_id = $1, updated_at = now()
+             WHERE id = $2 AND kind <> 'internal'",
+        )
+        .bind(g)
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected()
+    } else {
+        sqlx::query(
+            "UPDATE items SET kind = 'internal', updated_at = now()
+             WHERE id = $1 AND kind <> 'internal'",
+        )
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected()
+    };
+    Ok(affected as usize)
 }
 
 fn statement_source(doc: &DocumentRow) -> &'static str {
@@ -108,14 +219,15 @@ fn statement_source(doc: &DocumentRow) -> &'static str {
 }
 
 /// Insert structured (non-AI) items as `confirmed`, skipping duplicates.
+/// Returns the inserted ids so the caller can auto-link recurring rules.
 async fn insert_parsed_items(
     pool: &PgPool,
     doc: &DocumentRow,
     source: &str,
     items: &[ParsedItem],
-) -> Result<usize> {
+) -> Result<Vec<Uuid>> {
     let categories = load_categories(pool).await?;
-    let mut count = 0;
+    let mut ids = Vec::new();
     for item in items {
         // Skip items already imported from another document (avoid double-counting
         // when the same statement is uploaded twice with a different file).
@@ -127,12 +239,13 @@ async fn insert_parsed_items(
             .as_deref()
             .and_then(|c| match_category(&categories, c));
         let tags = tags::normalize(&item.tags);
-        sqlx::query(
+        let row: (Uuid,) = sqlx::query_as(
             "INSERT INTO items
                (parent_id, document_id, source, kind, status, account_id,
                 installment, installment_count, occurred_on, merchant, description,
                 amount_cents, currency, category_id, tags, raw_line)
-             VALUES (NULL, $1, $2, $3, 'confirmed', $4, $5, $6, $7, $8, $9, $10, 'BRL', $11, $12, NULL)",
+             VALUES (NULL, $1, $2, $3, 'confirmed', $4, $5, $6, $7, $8, $9, $10, 'BRL', $11, $12, NULL)
+             RETURNING id",
         )
         .bind(doc.id)
         .bind(source)
@@ -146,11 +259,19 @@ async fn insert_parsed_items(
         .bind(item.amount_cents)
         .bind(category_id)
         .bind(&tags)
-        .execute(pool)
+        .fetch_one(pool)
         .await?;
-        count += 1;
+        ids.push(row.0);
     }
-    Ok(count)
+    Ok(ids)
+}
+
+/// Auto-link freshly inserted confirmed items to recurring rules.
+async fn link_new_items(pool: &PgPool, ids: &[Uuid]) -> Result<()> {
+    for id in ids {
+        recurring::link_item(pool, *id).await?;
+    }
+    Ok(())
 }
 
 // ---------- PDF / image (AI extraction) ----------
@@ -164,7 +285,8 @@ async fn process_pdf(pool: &PgPool, doc: &DocumentRow, ai: &AiClient) -> Result<
     // Caixa credit-card fatura has a structured table we can parse directly.
     if caixa_card::is_caixa_card_fatura(&text) {
         let (_billing_month, items) = caixa_card::parse(&text)?;
-        insert_parsed_items(pool, doc, "card_statement", &items).await?;
+        let ids = insert_parsed_items(pool, doc, "card_statement", &items).await?;
+        link_new_items(pool, &ids).await?;
         sqlx::query(
             "UPDATE documents SET status = 'processed', ocr_text = $1, processed_at = now() WHERE id = $2",
         )

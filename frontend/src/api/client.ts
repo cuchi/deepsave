@@ -8,12 +8,12 @@ import type {
   Item,
   ItemSummary,
   MatchDetail,
+  MerchantProfile,
+  RecurringOccurrence,
   RecurringRule,
-  RecurringSuggestion,
   Source,
   SuggestionDetail,
   TagUsage,
-  UpcomingOccurrence,
 } from '../lib/types'
 
 // `indexes: null` serializes array params as repeated keys (?tags=a&tags=b)
@@ -143,6 +143,14 @@ export const itemsApi = {
   },
   async acceptSuggestion(id: string): Promise<Item> {
     return (await api.post<Item>(`/items/${id}/accept-suggestion`)).data
+  },
+  /** Link one item to a recurring rule (`ruleId: null` unlinks). */
+  async linkRecurring(id: string, ruleId: string | null): Promise<{ ok: boolean }> {
+    return (await api.post(`/items/${id}/link-recurring`, { rule_id: ruleId })).data
+  },
+  /** Link many items to a rule at once (`ruleId: null` unlinks). */
+  async bulkLinkRecurring(ids: string[], ruleId: string | null): Promise<{ ok: boolean; updated: number }> {
+    return (await api.post('/items/link-recurring', { ids, rule_id: ruleId })).data
   },
 }
 
@@ -325,7 +333,6 @@ export const tagsApi = {
 export interface TagRenameResult {
   ok: boolean
   items_updated: number
-  recurring_updated: number
   memory_updated: number
 }
 
@@ -387,8 +394,7 @@ export const memoryApi = {
 }
 
 export interface RecurringInput {
-  merchant?: string | null
-  description: string
+  name: string
   amount_cents: number
   category_id?: string | null
   frequency: string
@@ -396,6 +402,8 @@ export interface RecurringInput {
   day_of_month?: number | null
   next_due_on?: string | null
   is_active?: boolean
+  aliases?: string[]
+  isolated_cases?: string[]
 }
 
 export const recurringApi = {
@@ -411,10 +419,39 @@ export const recurringApi = {
   async remove(id: string): Promise<{ ok: boolean }> {
     return (await api.delete(`/recurring/${id}`)).data
   },
-  async upcoming(): Promise<UpcomingOccurrence[]> {
-    return (await api.get<UpcomingOccurrence[]>('/recurring/upcoming')).data
+  async occurrences(id: string): Promise<RecurringOccurrence[]> {
+    return (await api.get<RecurringOccurrence[]>(`/recurring/${id}/occurrences`)).data
   },
-  async suggestions(): Promise<RecurringSuggestion[]> {
-    return (await api.get<RecurringSuggestion[]>('/recurring/suggestions')).data
+  async merchants(q: string): Promise<string[]> {
+    return (await api.get<string[]>('/recurring/merchants', { params: { q } })).data
+  },
+  async merchantProfile(name: string): Promise<MerchantProfile> {
+    return (await api.get<MerchantProfile>('/recurring/merchant-profile', { params: { name } })).data
+  },
+}
+
+export interface TableCount {
+  table: string
+  count: number
+  size_bytes: number
+}
+
+export interface StatusCount {
+  status: string
+  count: number
+}
+
+export interface SystemInfo {
+  db_size_bytes: number
+  storage_size_bytes: number
+  storage_file_count: number
+  table_counts: TableCount[]
+  items_by_status: StatusCount[]
+  documents_by_status: StatusCount[]
+}
+
+export const systemApi = {
+  async get(): Promise<SystemInfo> {
+    return (await api.get<SystemInfo>('/system')).data
   },
 }

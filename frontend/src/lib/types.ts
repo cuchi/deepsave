@@ -93,8 +93,7 @@ export interface CoverageData {
 
 export interface RecurringRule {
   id: string
-  merchant: string | null
-  description: string
+  name: string
   amount_cents: number
   currency: string
   category_id: string | null
@@ -107,26 +106,33 @@ export interface RecurringRule {
   source: string
   created_at: string
   updated_at: string
+  /** Auto-match names (exact, normalized). */
+  aliases: string[]
+  /** One-shot manual references (no auto-match). */
+  isolated_cases: string[]
+  /** Derived from linked items (union of their tags). */
+  tags: string[]
+  /** True when linked items carry divergent tag sets. */
+  tags_conflict: boolean
+  days_until: number | null
 }
 
-export interface RecurringSuggestion {
-  merchant: string | null
+export interface RecurringOccurrence {
+  occurred_on: string
   description: string
   amount_cents: number
-  frequency: string
-  interval: number
-  count: number
-  last_seen: string
+  tags: string[]
+  linked_manually: boolean
 }
 
-export interface UpcomingOccurrence {
-  id: string
-  merchant: string | null
-  description: string
+export interface MerchantProfile {
+  merchant: string
   amount_cents: number
-  frequency: string
-  next_due_on: string
-  days_until: number
+  category_id: string | null
+  category_name: string | null
+  last_occurred_on: string
+  suggested_frequency: string
+  suggested_interval: number
 }
 
 export interface TagUsage {

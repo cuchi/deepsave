@@ -1,7 +1,7 @@
 # Plan — Recorrentes revamp (v0.9)
 
 > Design doc for the recurring-items feature revamp. Complements `PLAN.md` (the repo-wide
-> source of truth). Status: **draft — not implemented**.
+> source of truth). Status: **implemented** (all steps in §7 done; deviations noted inline).
 
 ## 1. Core concepts
 
