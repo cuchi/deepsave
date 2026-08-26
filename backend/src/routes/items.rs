@@ -125,6 +125,14 @@ pub(crate) fn split_filters(s: &Option<String>) -> Vec<String> {
 /// Sentinel value meaning "no category" / "no tags" in the filter params.
 pub(crate) const NO_FILTER: &str = "__none";
 
+/// When the installments filter is 'first_only', the first parcel stands in for
+/// the whole purchase: use the full series price (parcel × count) instead of
+/// just that parcel. References $9 (the installments param).
+const AMOUNT_ADJ: &str = "
+    CASE WHEN $9 = 'first_only' AND installment_count > 1 AND installment = 1
+         THEN amount_cents * installment_count
+         ELSE amount_cents END";
+
 /// Core list query, kept separate from the handler so integration tests can
 /// drive it without an `AppState` (mirrors `bulk_update_items`).
 pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppError> {
@@ -132,7 +140,11 @@ pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppEr
     let category_ids = split_filters(&q.category_ids);
     let tags = split_filters(&q.tags);
     let items = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
-        "SELECT {ITEM_COLS} FROM items
+        "SELECT id, parent_id, document_id, source, kind, status, account_id, transfer_group_id,
+                installment, installment_count, recurring_id, occurred_on, posted_on, merchant,
+                description, {AMOUNT_ADJ} AS amount_cents, currency, category_id,
+                suggested_category, tags, raw_line, match_confidence, created_at, updated_at
+         FROM items
          WHERE {ITEM_FILTERS}
          ORDER BY
            CASE WHEN $12 = 'value' THEN abs(amount_cents) END DESC,
@@ -166,7 +178,7 @@ pub async fn summary(pool: &PgPool, q: &ListQuery) -> Result<ItemSummary, AppErr
     let tags = split_filters(&q.tags);
     let row = sqlx::query_as::<_, ItemSummary>(sqlx::AssertSqlSafe(format!(
         "SELECT count(*)::bigint AS count,
-                COALESCE(SUM(amount_cents), 0)::bigint AS total_cents
+                COALESCE(SUM({AMOUNT_ADJ}), 0)::bigint AS total_cents
          FROM items
          WHERE parent_id IS NULL AND {ITEM_FILTERS}"
     )))

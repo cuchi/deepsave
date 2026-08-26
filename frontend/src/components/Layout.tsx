@@ -27,13 +27,10 @@ export default function Layout() {
               Lista
             </Link>
             <Link to="/upload" className="hover:text-zinc-100">
-              Upload
+              Documentos
             </Link>
             <Link to="/review" className="hover:text-zinc-100">
               Revisar
-            </Link>
-            <Link to="/coverage" className="hover:text-zinc-100">
-              Cobertura
             </Link>
             <Link to="/memory" className="hover:text-zinc-100">
               Memória

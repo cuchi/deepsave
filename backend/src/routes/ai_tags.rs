@@ -66,7 +66,7 @@ pub async fn list_suggestions_query(
         "SELECT s.id, s.batch_id, b.status AS batch_status, s.item_id, s.suggested_tags,
                 s.status, s.created_at,
                 i.merchant, i.description, i.amount_cents, i.occurred_on,
-                i.category_id, c.name AS category_name, i.tags
+                i.category_id, c.name AS category_name, i.tags, i.document_id
          FROM ai_tag_suggestions s
          JOIN ai_tag_batches b ON b.id = s.batch_id
          JOIN items i ON i.id = s.item_id

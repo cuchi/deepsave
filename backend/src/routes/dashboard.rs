@@ -98,6 +98,13 @@ const AGG_FILTERS: &str = "
          OR ($8 = 'only' AND COALESCE(installment_count, 0) > 1))
 ";
 
+/// When the installments filter is 'first_only', the first parcel stands in for
+/// the whole purchase (parcel × count). References $8 (the installments param).
+const AGG_AMOUNT_ADJ: &str = "
+    CASE WHEN $8 = 'first_only' AND installment_count > 1 AND installment = 1
+         THEN amount_cents * installment_count
+         ELSE amount_cents END";
+
 /// Resolve the aggregation window: explicit date range wins; else `month`;
 /// else no date filter (all history). The UI pre-fills the last complete month
 /// on first load, but the API itself must not — "cleared dates" means "tudo".
@@ -168,8 +175,8 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     let category_ids = split_filters(&q.category_ids);
     let tags = split_filters(&q.tags);
     let (spend, income): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT COALESCE(SUM(CASE WHEN kind = 'expense' THEN -amount_cents ELSE 0 END), 0)::bigint,
-                COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0)::bigint
+        "SELECT COALESCE(SUM(CASE WHEN kind = 'expense' THEN -{AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint,
+                COALESCE(SUM(CASE WHEN kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
          FROM items
          WHERE parent_id IS NULL AND {AGG_FILTERS}"
     )))
@@ -186,7 +193,7 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
 
     let by_category: Vec<CategoryTotal> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT c.id AS category_id, c.name AS name, c.color AS color,
-                COALESCE(SUM(-items.amount_cents), 0)::bigint AS total_cents
+                COALESCE(SUM(-{AGG_AMOUNT_ADJ}), 0)::bigint AS total_cents
          FROM items
          JOIN categories c ON c.id = items.category_id
          WHERE items.parent_id IS NULL AND items.kind = 'expense' AND {AGG_FILTERS}
@@ -205,7 +212,7 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     .await?;
 
     let top_merchants: Vec<MerchantTotal> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT merchant, SUM(-items.amount_cents)::bigint AS total_cents
+        "SELECT merchant, SUM(-{AGG_AMOUNT_ADJ})::bigint AS total_cents
          FROM items
          WHERE items.parent_id IS NULL AND items.kind = 'expense' AND merchant IS NOT NULL
            AND {AGG_FILTERS}
@@ -264,8 +271,8 @@ pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>
 
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT to_char(occurred_on, 'YYYY-MM'),
-                COALESCE(SUM(CASE WHEN kind = 'expense' THEN -amount_cents ELSE 0 END), 0)::bigint,
-                COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0)::bigint
+                COALESCE(SUM(CASE WHEN kind = 'expense' THEN -{AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint,
+                COALESCE(SUM(CASE WHEN kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
          FROM items
          WHERE parent_id IS NULL AND {AGG_FILTERS}
          GROUP BY 1
@@ -356,7 +363,7 @@ pub async fn daily_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<DailyPoint>
     let rows = sqlx::query_as::<_, DailyPoint>(sqlx::AssertSqlSafe(format!(
         "SELECT items.occurred_on AS date,
                 CASE WHEN $9 = 'category' THEN COALESCE(c.name, 'Sem categoria') END AS key,
-                SUM(-items.amount_cents)::bigint AS total_cents
+                SUM(-{AGG_AMOUNT_ADJ})::bigint AS total_cents
          FROM items
          LEFT JOIN categories c ON c.id = items.category_id
          WHERE items.parent_id IS NULL AND items.kind = 'expense' AND {AGG_FILTERS}
@@ -390,7 +397,7 @@ pub async fn tags_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<TagTotal>, A
     let category_ids = split_filters(&q.category_ids);
     let tags = split_filters(&q.tags);
     let rows = sqlx::query_as::<_, TagTotal>(sqlx::AssertSqlSafe(format!(
-        "SELECT tag, SUM(-items.amount_cents)::bigint AS total_cents
+        "SELECT tag, SUM(-{AGG_AMOUNT_ADJ})::bigint AS total_cents
          FROM items CROSS JOIN LATERAL unnest(items.tags) AS tag
          WHERE items.parent_id IS NULL AND items.kind = 'expense' AND {AGG_FILTERS}
          GROUP BY tag

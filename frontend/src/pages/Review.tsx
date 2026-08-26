@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { aiTagsApi, categoriesApi, itemsApi, matchesApi, memoryApi, tagsApi } from '../api/client'
-import type { Item, SuggestionDetail } from '../lib/types'
+import { aiTagsApi, categoriesApi, documentsApi, itemsApi, matchesApi, memoryApi, sourcesApi, tagsApi } from '../api/client'
+import type { Item, Source, SuggestionDetail } from '../lib/types'
 import { fmtCents } from '../lib/format'
 import ItemForm from '../components/ItemForm'
 
@@ -20,6 +20,49 @@ const KIND_LABELS: Record<string, string> = {
   internal: 'Interna',
 }
 
+// Approximate brand colors + initials for the source “logo” dot.
+const BANK_COLORS: Record<string, string> = {
+  nubank: '#820ad1',
+  c6: '#e4e4e7',
+  caixa: '#0d5aa7',
+  itau: '#ec7000',
+  bradesco: '#cc092f',
+  santander: '#ec0000',
+  bb: '#f9a11b',
+}
+const BANK_INITIALS: Record<string, string> = {
+  nubank: 'N',
+  c6: 'C',
+  caixa: 'Cx',
+  itau: 'It',
+  bradesco: 'Br',
+  santander: 'St',
+  bb: 'BB',
+}
+
+/** Small pill: bank “logo” dot + source name (+ 💳 when it's a credit-card fatura). */
+function SourceBadge({ source }: { source?: Source }) {
+  if (!source) return null
+  const color = BANK_COLORS[source.bank] ?? '#71717a'
+  const initial = BANK_INITIALS[source.bank] ?? source.bank.slice(0, 1).toUpperCase()
+  const card = source.kind === 'card_statement'
+  return (
+    <span
+      className="flex max-w-44 shrink-0 items-center gap-1.5 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300"
+      title={`${source.name} — ${card ? 'cartão de crédito' : 'extrato bancário'}`}
+    >
+      {card && <span>💳</span>}
+      <span
+        className="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full text-[8px] font-bold text-zinc-950"
+        style={{ background: color }}
+      >
+        {initial}
+      </span>
+      <span className="truncate">{source.name}</span>
+    </span>
+  )
+}
+
 function normMerchant(s: string): string {
   return s
     .trim()
@@ -31,11 +74,13 @@ function normMerchant(s: string): string {
 /** One AI tag proposal with inline editing: remove chips, add new ones, apply. */
 function SuggestionRow({
   s,
+  source,
   onApply,
   onDismiss,
   busy,
 }: {
   s: SuggestionDetail
+  source?: Source
   onApply: (id: string, tags: string[]) => void
   onDismiss: (id: string) => void
   busy: boolean
@@ -63,6 +108,7 @@ function SuggestionRow({
             {s.tags.length > 0 ? ` · atual: ${s.tags.join(', ')}` : ''}
           </p>
         </div>
+        <SourceBadge source={source} />
         <span className="shrink-0 text-sm tabular-nums">{fmtCents(s.amount_cents)}</span>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -156,6 +202,24 @@ export default function Review() {
     queryKey: ['tags'],
     queryFn: tagsApi.list,
   })
+  const { data: documents = [] } = useQuery({
+    queryKey: ['documents'],
+    queryFn: documentsApi.list,
+  })
+  const { data: sources = [] } = useQuery({
+    queryKey: ['sources'],
+    queryFn: sourcesApi.list,
+  })
+
+  // items.document_id → documents.source_id → sources (bank, kind, name)
+  const docById = useMemo(() => new Map(documents.map((d) => [d.id, d])), [documents])
+  const sourceById = useMemo(() => new Map(sources.map((s) => [s.id, s])), [sources])
+  const sourceForDoc = (docId: string | null): Source | undefined => {
+    if (!docId) return undefined
+    const doc = docById.get(docId)
+    return doc?.source_id ? sourceById.get(doc.source_id) : undefined
+  }
+  const itemSource = (it: Item): Source | undefined => sourceForDoc(it.document_id)
 
   const memoryByMerchant = new Map(memory.map((m) => [m.merchant, m]))
   const catName = (id: string | null) => categories.find((c) => c.id === id)?.name
@@ -278,6 +342,9 @@ export default function Review() {
                           : '−'}
                       {fmtCents(it.amount_cents)}
                     </span>
+                    {it.document_id && (
+                      <SourceBadge source={itemSource(it)} />
+                    )}
                     <button
                       onClick={() => setEditing(it)}
                       className="text-xs text-zinc-500 hover:text-zinc-200"
@@ -375,6 +442,7 @@ export default function Review() {
                             <SuggestionRow
                               key={s.id}
                               s={s}
+                              source={sourceForDoc(s.document_id)}
                               onApply={(id, tags) => applySuggestion.mutate({ id, tags })}
                               onDismiss={(id) => dismissSuggestion.mutate(id)}
                               busy={applySuggestion.isPending || dismissSuggestion.isPending}
@@ -461,6 +529,7 @@ export default function Review() {
                     <div className="mt-1 text-xs text-zinc-500">
                       {fmtCents(m.child.amount_cents)} dentro de {fmtCents(m.parent.amount_cents)} ·{' '}
                       {m.child.occurred_on} vs {m.parent.occurred_on}
+                      {itemSource(m.parent) ? ` · ${itemSource(m.parent)!.name}` : ''}
                     </div>
                   </div>
                 ))}

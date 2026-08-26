@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { documentsApi, sourcesApi, type DocumentKind } from '../api/client'
+import { coverageApi, documentsApi, sourcesApi, type DocumentKind } from '../api/client'
 import type { DocumentSummary } from '../lib/types'
 import BankLogo from '../components/BankLogo'
 
@@ -125,6 +125,13 @@ export default function Upload() {
   })
   const { data: sources = [] } = useQuery({ queryKey: ['sources'], queryFn: sourcesApi.list })
 
+  const { data: coverage } = useQuery({ queryKey: ['coverage'], queryFn: coverageApi.get })
+  const toggleSource = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      sourcesApi.update(id, { enabled }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['coverage'] }),
+  })
+
   const bankBySource = new Map(sources.map((s) => [s.id, s.bank]))
 
   const remove = useMutation({
@@ -160,7 +167,7 @@ export default function Upload() {
 
   return (
     <div>
-      <h1 className="mb-4 text-xl font-bold">Upload de documentos</h1>
+      <h1 className="mb-4 text-xl font-bold">Documentos</h1>
 
       <div className="mb-6 flex items-center gap-3">
         <select
@@ -202,6 +209,61 @@ export default function Upload() {
             />
           ))
         )}
+      </div>
+
+      {/* Coverage */}
+      <h2 className="mb-2 mt-10 text-lg font-semibold">Cobertura de fontes</h2>
+      <p className="mb-4 text-sm text-zinc-500">
+        Fontes fundamentais (bancos × conta/cartão) e os últimos {(coverage?.months ?? []).length}{' '}
+        meses. <span className="text-emerald-400">●</span> presente ·{' '}
+        <span className="text-zinc-700">●</span> ausente.
+      </p>
+
+      <div className="overflow-x-auto rounded border border-zinc-800">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-zinc-800">
+              <th className="py-2 pl-4 pr-4 text-left font-medium text-zinc-400">Fonte</th>
+              {(coverage?.months ?? []).map((m) => (
+                <th
+                  key={m}
+                  className="px-1 py-2 text-center text-[10px] font-normal text-zinc-500"
+                >
+                  {`${m.slice(5)}/${m.slice(2, 4)}`}
+                </th>
+              ))}
+              <th className="py-2 pl-4 pr-4 text-left font-medium text-zinc-400">Último envio</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(coverage?.sources ?? []).map((s) => {
+              const present = new Set(s.present)
+              return (
+                <tr key={s.id} className={s.enabled ? '' : 'opacity-40'}>
+                  <td className="py-2 pl-4 pr-4">
+                    <span className="font-medium">{s.name}</span>
+                    <button
+                      onClick={() => toggleSource.mutate({ id: s.id, enabled: !s.enabled })}
+                      className="ml-2 text-xs text-zinc-500 hover:text-zinc-200"
+                    >
+                      {s.enabled ? 'desativar' : 'ativar'}
+                    </button>
+                  </td>
+                  {(coverage?.months ?? []).map((m) => (
+                    <td key={m} className="px-1 py-2 text-center">
+                      <span className={present.has(m) ? 'text-emerald-400' : 'text-zinc-700'}>
+                        ●
+                      </span>
+                    </td>
+                  ))}
+                  <td className="py-2 pl-4 pr-4 text-xs text-zinc-500">
+                    {s.last_seen ? new Date(s.last_seen).toLocaleDateString('pt-BR') : 'nunca'}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   )

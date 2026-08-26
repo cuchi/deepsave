@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import type { Category } from '../lib/types'
+import PeriodPicker from './PeriodPicker'
 
 export interface ItemFiltersValue {
   search: string
@@ -316,26 +317,11 @@ export default function ItemFilters({
           />
         </div>
 
-        <div className="sm:col-span-2">
-          <FieldLabel>Período</FieldLabel>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="date"
-              value={value.dateFrom}
-              onChange={(e) => onChange(set(value, { dateFrom: e.target.value }))}
-              title="Data inicial (inclusive)"
-              className="field min-w-0 flex-1"
-            />
-            <span className="shrink-0 text-xs text-zinc-600">–</span>
-            <input
-              type="date"
-              value={value.dateTo}
-              onChange={(e) => onChange(set(value, { dateTo: e.target.value }))}
-              title="Data final (inclusive)"
-              className="field min-w-0 flex-1"
-            />
-          </div>
-        </div>
+        <PeriodPicker
+          dateFrom={value.dateFrom}
+          dateTo={value.dateTo}
+          onChange={(from, to, opts) => onChange(set(value, { dateFrom: from, dateTo: to }), opts)}
+        />
 
         <MultiSelect
           label="Categorias"

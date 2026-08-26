@@ -275,6 +275,7 @@ pub struct SuggestionDetail {
     pub category_id: Option<Uuid>,
     pub category_name: Option<String>,
     pub tags: Vec<String>,
+    pub document_id: Option<Uuid>,
 }
 
 // ---------- Recurring rules ----------

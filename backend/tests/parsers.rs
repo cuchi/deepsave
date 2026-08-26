@@ -65,9 +65,27 @@ Data Lançamento,Data Contábil,Título,Descrição,Entrada(R$),Saída(R$),Saldo
 fn nubank_card_fixture_parses() {
     let items = csv::parse_csv(&read_fixture("nubank_card.csv"), None).unwrap();
     assert_eq!(items.len(), 5);
-    let income = items.iter().find(|i| i.kind == "income").unwrap();
-    assert_eq!(income.amount_cents, 24380);
+    // Negative amount = credit on the card: a bill payment received is internal,
+    // not income (the bank side is also internal).
+    let payment = items.iter().find(|i| i.kind == "internal").unwrap();
+    assert_eq!(payment.amount_cents, 24380);
     assert!(items.iter().any(|i| i.kind == "expense"));
+}
+
+#[test]
+fn nubank_card_credits_classify_bill_payment_and_refund() {
+    let content = "date,title,amount\n\
+2026-07-09,Pagamento recebido,\"-243.80\"\n\
+2026-07-10,Estorno - Loja Teste,\"-100.00\"\n\
+2026-07-11,Cashback,\"-5.50\"\n";
+    let items = csv::parse_csv(content, None).unwrap();
+    assert_eq!(items.len(), 3);
+    let payment = items.iter().find(|i| i.description == "Pagamento recebido").unwrap();
+    assert_eq!(payment.kind, "internal");
+    let estorno = items.iter().find(|i| i.description.contains("Estorno")).unwrap();
+    assert_eq!(estorno.kind, "refund");
+    let cashback = items.iter().find(|i| i.description == "Cashback").unwrap();
+    assert_eq!(cashback.kind, "income");
 }
 
 #[test]

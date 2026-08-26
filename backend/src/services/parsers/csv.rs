@@ -51,12 +51,28 @@ fn parse_nubank_card(content: &str, delimiter: u8) -> Result<Vec<ParsedItem>> {
         let (cents, negative) = parse_amount(rec[2].trim())?;
 
         if negative {
+            // A credit on the card statement is either a bill payment received
+            // (internal — the real spend is in the fatura), a purchase reversal
+            // (refund) or a genuine credit (income, e.g. cashback).
+            let lower = title.to_lowercase();
+            let kind = if lower.contains("pagamento recebido")
+                || lower.contains("payment received")
+                || lower.contains("pagamento fatura")
+                || lower.contains("pagamento da fatura")
+                || lower.contains("pagamento de fatura")
+            {
+                "internal"
+            } else if lower.contains("estorno") || lower.contains("reembolso") {
+                "refund"
+            } else {
+                "income"
+            };
             out.push(ParsedItem {
                 occurred_on: date,
                 description: title.clone(),
                 merchant: Some(title.clone()),
                 amount_cents: cents,
-                kind: "income".into(),
+                kind: kind.into(),
                 category: None,
                 installment: None,
                 installment_count: None,

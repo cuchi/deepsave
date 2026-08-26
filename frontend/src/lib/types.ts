@@ -163,4 +163,5 @@ export interface SuggestionDetail {
   category_id: string | null
   category_name: string | null
   tags: string[]
+  document_id: string | null
 }

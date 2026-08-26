@@ -107,9 +107,12 @@ Categorias and Tags filters support **multiple options** (OR semantics: item in
 any selected category / carries any selected tag), on the Lista, the summary and
 the graphs. Backend: `category_ids` / `tags` as comma-separated query params
 (parsed in the shared `ITEM_FILTERS`/`AGG_FILTERS` fragments via
-`cardinality(...) = 0 OR ...`). Frontend: checkbox dropdowns (MultiSelect) replace
-the single selects; URL params carry comma-joined values; one removable chip per
-selected category/tag.
+`cardinality(...) = 0 OR ...`; a `__none` sentinel adds "Sem categoria"/"Sem
+tags"). Frontend: checkbox dropdowns (MultiSelect) replace the single selects;
+URL params carry comma-joined values; one removable chip per selected
+category/tag. With `installments=first_only`, the first parcel **shows the whole
+price** (`amount_cents × installment_count`) in the list, the summary and every
+graph aggregation.
 
 ### M17 — ECharts migration + new graphs
 Switched the graphs page from Recharts to **ECharts** (tree-shaken

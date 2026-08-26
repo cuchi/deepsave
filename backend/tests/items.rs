@@ -142,8 +142,9 @@ async fn summary_respects_exclude_installments(pool: PgPool) {
     let mut q = base_query();
     q.installments = Some("first_only".to_string());
     let s = summary(&pool, &q).await.unwrap();
+    // First parcel stands in for the whole purchase: full price = parcel × count.
     assert_eq!(s.count, 1);
-    assert_eq!(s.total_cents, -100);
+    assert_eq!(s.total_cents, -300);
 
     // 'only' → the whole series.
     let mut q = base_query();
@@ -326,4 +327,30 @@ async fn none_sentinel_filters_uncategorized_and_untagged(pool: PgPool) {
     let s = summary(&pool, &q).await.unwrap();
     assert_eq!(s.count, 1);
     assert_eq!(s.total_cents, -200);
+}
+
+#[sqlx::test]
+async fn first_only_shows_full_price_in_list_and_summary(pool: PgPool) {
+    common::migrate(&pool).await;
+    insert_item(&pool, "celular 1/10", -1500, Some(1), Some(10)).await;
+    insert_item(&pool, "celular 2/10", -1500, Some(2), Some(10)).await;
+    insert_item(&pool, "padaria", -50, None, None).await;
+
+    // Default: every parcel at its own amount.
+    let all = list_items(&pool, &base_query()).await.unwrap();
+    assert_eq!(all.len(), 3);
+
+    // first_only: only the first parcel remains, at the FULL price (1500 × 10).
+    let mut q = base_query();
+    q.installments = Some("first_only".to_string());
+    let items = list_items(&pool, &q).await.unwrap();
+    assert_eq!(items.len(), 2);
+    let first = items.iter().find(|i| i.description == "celular 1/10").unwrap();
+    assert_eq!(first.amount_cents, -15000);
+    let padaria = items.iter().find(|i| i.description == "padaria").unwrap();
+    assert_eq!(padaria.amount_cents, -50);
+
+    let s = summary(&pool, &q).await.unwrap();
+    assert_eq!(s.count, 2);
+    assert_eq!(s.total_cents, -15050);
 }
