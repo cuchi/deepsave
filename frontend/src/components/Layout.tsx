@@ -26,6 +26,9 @@ export default function Layout() {
             <Link to="/lista" className="hover:text-zinc-100">
               Lista
             </Link>
+            <Link to="/forecast" className="hover:text-zinc-100">
+              Previsão
+            </Link>
             <Link to="/upload" className="hover:text-zinc-100">
               Documentos
             </Link>

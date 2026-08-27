@@ -28,6 +28,7 @@ pub fn test_config(base_url: String) -> Config {
         session_secret: "test-secret-at-least-32-bytes".to_string(),
         password_hash: None,
         password_plain: None,
+        cookie_secure: false,
         static_dir: String::new(),
         storage_dir: String::new(),
         deepseek_api_key: Some("test-key".to_string()),

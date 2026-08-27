@@ -333,3 +333,67 @@ async fn expected_combines_installments_and_recurring(pool: PgPool) {
     assert_eq!(recurring_cents, 500);
     assert_eq!(total_cents, 600);
 }
+
+#[sqlx::test]
+async fn forecast_buckets_by_month_and_upcoming_feed(pool: PgPool) {
+    use deepsave_backend::routes::dashboard::{forecast_data, upcoming_data};
+    common::migrate(&pool).await;
+    let today = Utc::now().date_naive();
+    let next_month = today + Months::new(1);
+
+    // Series at 2/3: last parcel this month → next parcel next month (-100).
+    let src = insert_source(&pool).await;
+    let d1 = insert_doc(&pool).await;
+    let d2 = insert_doc(&pool).await;
+    insert_item(&pool, d1, &(today - Months::new(1)).format("%Y-%m-%d").to_string(), "CELULAR", -100, 1, 3).await;
+    insert_item(&pool, d2, &today.format("%Y-%m-%d").to_string(), "CELULAR", -100, 2, 3).await;
+    series::assign_document(
+        &pool,
+        &doc(d1, Some(src)),
+        &[item(today - Months::new(1), Some(today - Months::new(2)), "CELULAR", -100, 1, 3)],
+    )
+    .await
+    .unwrap();
+    series::assign_document(
+        &pool,
+        &doc(d2, Some(src)),
+        &[item(today, Some(today - Months::new(2)), "CELULAR", -100, 2, 3)],
+    )
+    .await
+    .unwrap();
+
+    // Monthly rule due next month (-500).
+    let due = NaiveDate::from_ymd_opt(next_month.year(), next_month.month(), 1).unwrap()
+        + chrono::Duration::days(5);
+    sqlx::query(
+        "INSERT INTO recurring_rules (name, amount_cents, frequency, interval, is_active, next_due_on)
+         VALUES ('aluguel', -500, 'monthly', 1, true, $1::date)",
+    )
+    .bind(due)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Forecast: 2 months. Month 0 (current) = parcel? No — parcel lands next
+    // month. Rule due next month. So month0 = 0, month1 = 100 + 500.
+    let f = forecast_data(&pool, 2).await.unwrap();
+    assert_eq!(f.len(), 2);
+    assert_eq!(f[0].installments_cents, 0);
+    assert_eq!(f[1].installments_cents, 100);
+    assert_eq!(f[1].recurring_cents, 500);
+    assert_eq!(f[1].total_cents, 600);
+
+    // Upcoming feed (90 days): the parcel + the rule's occurrences (Sep, Oct,
+    // Nov), sorted by date.
+    let u = upcoming_data(&pool, 90).await.unwrap();
+    assert_eq!(u.len(), 4);
+    assert!(u.windows(2).all(|w| w[0].date <= w[1].date));
+    let parcel = u.iter().find(|x| x.kind == "parcel").unwrap();
+    assert_eq!(parcel.amount_cents, 100);
+    assert_eq!(parcel.progress.as_deref(), Some("3/3"));
+    assert_eq!(parcel.description, "CELULAR");
+    let rec = u.iter().find(|x| x.kind == "recurring").unwrap();
+    assert_eq!(rec.amount_cents, 500);
+    assert_eq!(rec.description, "aluguel");
+    assert!(rec.progress.is_none());
+}

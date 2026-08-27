@@ -458,8 +458,11 @@ pub async fn expected_data(
         });
     }
 
-    let installments_cents = expected_installments(pool, from, to).await?;
-    let recurring_cents = expected_recurring(pool, from, to, today).await?;
+    let (installments, recurring) = future_events(pool, today, to).await?;
+    let installments_cents =
+        installments.iter().filter(|(d, _)| *d >= from).map(|(_, a)| a).sum::<i64>();
+    let recurring_cents =
+        recurring.iter().filter(|(d, _)| *d >= from).map(|(_, a)| a).sum::<i64>();
     Ok(ExpectedSpend {
         installments_cents,
         recurring_cents,
@@ -467,11 +470,18 @@ pub async fn expected_data(
     })
 }
 
-/// Future parcels of in-progress series: parcel k+1 in month M+1 after the
-/// latest billed parcel (month M). Uses the latest parcel amount.
-async fn expected_installments(pool: &PgPool, from: NaiveDate, to: NaiveDate) -> Result<i64, AppError> {
-    let rows: Vec<(Uuid, i32, i32, NaiveDate, i64)> = sqlx::query_as(
-        "SELECT s.id, s.installment_count, st.max_inst, st.last_date, p.amount_cents
+/// All dated future expense events (parcels + recurrences) between `today` and
+/// `limit`, inclusive. Shared by the expected KPI, the monthly forecast and the
+/// upcoming feed.
+async fn future_events(
+    pool: &PgPool,
+    today: NaiveDate,
+    limit: NaiveDate,
+) -> Result<(Vec<(NaiveDate, i64)>, Vec<(NaiveDate, i64)>), AppError> {
+    // Future parcels of in-progress series: parcel k+1 in month M+1 after the
+    // latest billed parcel (month M), at the latest parcel amount.
+    let rows: Vec<(i32, i32, NaiveDate, i64)> = sqlx::query_as(
+        "SELECT s.installment_count, st.max_inst, st.last_date, p.amount_cents
          FROM purchase_series s
          JOIN LATERAL (
            SELECT MAX(i.installment)::int AS max_inst, MAX(i.occurred_on) AS last_date
@@ -486,8 +496,8 @@ async fn expected_installments(pool: &PgPool, from: NaiveDate, to: NaiveDate) ->
     .fetch_all(pool)
     .await?;
 
-    let mut total = 0i64;
-    for (_sid, count, max_inst, last_date, amount_cents) in rows {
+    let mut installments = Vec::new();
+    for (count, max_inst, last_date, amount_cents) in rows {
         if amount_cents >= 0 {
             continue;
         }
@@ -496,38 +506,36 @@ async fn expected_installments(pool: &PgPool, from: NaiveDate, to: NaiveDate) ->
             let Some(d) = last_date.checked_add_months(chrono::Months::new(months)) else {
                 continue;
             };
-            if d >= from && d <= to {
-                total += amount_cents.unsigned_abs() as i64;
+            if d >= today && d <= limit {
+                installments.push((d, amount_cents.unsigned_abs() as i64));
             }
         }
     }
-    Ok(total)
-}
 
-/// Future occurrences of active expense rules, anchored at `next_due_on`
-/// (advanced to >= today), stepped by the rule's window.
-async fn expected_recurring(pool: &PgPool, from: NaiveDate, to: NaiveDate, today: NaiveDate) -> Result<i64, AppError> {
-    let rows: Vec<(i64, String, i32, NaiveDate)> = sqlx::query_as(
+    // Future occurrences of active expense rules, anchored at next_due_on
+    // (advanced to >= today), stepped by the rule's window.
+    let rules: Vec<(i64, String, i32, NaiveDate)> = sqlx::query_as(
         "SELECT amount_cents, frequency, interval, next_due_on
          FROM recurring_rules WHERE is_active AND amount_cents < 0 AND next_due_on IS NOT NULL",
     )
     .fetch_all(pool)
     .await?;
 
-    let mut total = 0i64;
-    for (amount_cents, frequency, interval, next_due) in rows {
+    let mut recurring = Vec::new();
+    for (amount_cents, frequency, interval, next_due) in rules {
         let mut d = crate::services::recurring::advance_next_due(next_due, &frequency, interval, today);
         for _ in 0..1200 {
-            if d > to {
+            if d > limit {
                 break;
             }
-            if d >= from {
-                total += amount_cents.unsigned_abs() as i64;
+            if d >= today {
+                recurring.push((d, amount_cents.unsigned_abs() as i64));
             }
             d = step_occurrence(d, &frequency, interval);
         }
     }
-    Ok(total)
+
+    Ok((installments, recurring))
 }
 
 fn step_occurrence(d: NaiveDate, frequency: &str, interval: i32) -> NaiveDate {
@@ -537,4 +545,178 @@ fn step_occurrence(d: NaiveDate, frequency: &str, interval: i32) -> NaiveDate {
         "monthly" => d.checked_add_months(chrono::Months::new(interval)).unwrap_or(d),
         _ => d.checked_add_months(chrono::Months::new(interval * 12)).unwrap_or(d),
     }
+}
+
+// ---------- Monthly forecast + upcoming feed ----------
+
+#[derive(Debug, Deserialize)]
+pub struct ForecastQuery {
+    pub months: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ForecastPoint {
+    pub month: String,
+    pub installments_cents: i64,
+    pub recurring_cents: i64,
+    pub total_cents: i64,
+}
+
+/// `GET /dashboard/forecast?months=N` — expected spend per month for the next
+/// N months (parcels + recurrences). Filter-free; expenses only; dates >= today.
+pub async fn forecast(
+    State(state): State<AppState>,
+    Query(q): Query<ForecastQuery>,
+) -> Result<Json<Vec<ForecastPoint>>, AppError> {
+    Ok(Json(forecast_data(&state.pool, q.months.unwrap_or(3)).await?))
+}
+
+pub async fn forecast_data(pool: &PgPool, months: i32) -> Result<Vec<ForecastPoint>, AppError> {
+    let months = months.clamp(1, 24);
+    let today = chrono::Utc::now().date_naive();
+    let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+    let last_first = first.checked_add_months(chrono::Months::new(months as u32 - 1)).unwrap();
+    let limit = last_first + chrono::Months::new(1) - chrono::Duration::days(1);
+
+    let (installments, recurring) = future_events(pool, today, limit).await?;
+
+    let mut out: Vec<ForecastPoint> = (0..months as u32)
+        .map(|k| {
+            let m = first.checked_add_months(chrono::Months::new(k)).unwrap();
+            ForecastPoint {
+                month: m.format("%Y-%m").to_string(),
+                installments_cents: 0,
+                recurring_cents: 0,
+                total_cents: 0,
+            }
+        })
+        .collect();
+    let bucket = |d: NaiveDate| -> Option<usize> {
+        let idx = (d.year() * 12 + d.month() as i32) - (first.year() * 12 + first.month() as i32);
+        (0..months).contains(&idx).then_some(idx as usize)
+    };
+    for (d, a) in installments {
+        if let Some(i) = bucket(d) {
+            out[i].installments_cents += a;
+        }
+    }
+    for (d, a) in recurring {
+        if let Some(i) = bucket(d) {
+            out[i].recurring_cents += a;
+        }
+    }
+    for p in &mut out {
+        p.total_cents = p.installments_cents + p.recurring_cents;
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpcomingQuery {
+    pub days: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpcomingItem {
+    pub date: NaiveDate,
+    /// 'parcel' | 'recurring'
+    pub kind: String,
+    pub description: String,
+    pub category_name: Option<String>,
+    pub amount_cents: i64,
+    /// "3/12" for parcels, null for recurrences.
+    pub progress: Option<String>,
+}
+
+/// `GET /dashboard/upcoming?days=N` — flat, dated feed of the next obligations
+/// (future parcels + recurring occurrences), sorted by date.
+pub async fn upcoming(
+    State(state): State<AppState>,
+    Query(q): Query<UpcomingQuery>,
+) -> Result<Json<Vec<UpcomingItem>>, AppError> {
+    Ok(Json(upcoming_data(&state.pool, q.days.unwrap_or(90)).await?))
+}
+
+pub async fn upcoming_data(pool: &PgPool, days: i64) -> Result<Vec<UpcomingItem>, AppError> {
+    let today = chrono::Utc::now().date_naive();
+    let limit = today + chrono::Duration::days(days.clamp(1, 3650));
+    let mut out = Vec::new();
+
+    // Parcels, with description + category + progress from the latest billed parcel.
+    let rows: Vec<(i32, i32, NaiveDate, i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT s.installment_count, st.max_inst, st.last_date, p.amount_cents,
+                p.description, c.name
+         FROM purchase_series s
+         JOIN LATERAL (
+           SELECT MAX(i.installment)::int AS max_inst, MAX(i.occurred_on) AS last_date
+           FROM items i WHERE i.series_id = s.id
+         ) st ON true
+         JOIN LATERAL (
+           SELECT i.amount_cents, i.description, i.category_id FROM items i
+           WHERE i.series_id = s.id ORDER BY i.installment DESC, i.occurred_on DESC LIMIT 1
+         ) p ON true
+         LEFT JOIN categories c ON c.id = p.category_id
+         WHERE st.max_inst IS NOT NULL AND st.max_inst < s.installment_count",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (count, max_inst, last_date, amount_cents, description, category_name) in rows {
+        if amount_cents >= 0 {
+            continue;
+        }
+        for k in (max_inst + 1)..=count {
+            let months = (k - max_inst) as u32;
+            let Some(d) = last_date.checked_add_months(chrono::Months::new(months)) else {
+                continue;
+            };
+            if d > limit {
+                break;
+            }
+            if d >= today {
+                out.push(UpcomingItem {
+                    date: d,
+                    kind: "parcel".to_string(),
+                    description: description.clone(),
+                    category_name: category_name.clone(),
+                    amount_cents: amount_cents.unsigned_abs() as i64,
+                    progress: Some(format!("{k}/{count}")),
+                });
+            }
+        }
+    }
+
+    // Recurrences: rule name + category from its latest linked item.
+    let rules: Vec<(i64, String, i32, NaiveDate, String, Option<String>)> = sqlx::query_as(
+        "SELECT r.amount_cents, r.frequency, r.interval, r.next_due_on, r.name, c.name
+         FROM recurring_rules r
+         LEFT JOIN LATERAL (
+           SELECT c2.name FROM items i JOIN categories c2 ON c2.id = i.category_id
+           WHERE i.recurring_id = r.id ORDER BY i.occurred_on DESC LIMIT 1
+         ) c ON true
+         WHERE r.is_active AND r.amount_cents < 0 AND r.next_due_on IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (amount_cents, frequency, interval, next_due, name, category_name) in rules {
+        let mut d = crate::services::recurring::advance_next_due(next_due, &frequency, interval, today);
+        for _ in 0..1200 {
+            if d > limit {
+                break;
+            }
+            if d >= today {
+                out.push(UpcomingItem {
+                    date: d,
+                    kind: "recurring".to_string(),
+                    description: name.clone(),
+                    category_name: category_name.clone(),
+                    amount_cents: amount_cents.unsigned_abs() as i64,
+                    progress: None,
+                });
+            }
+            d = step_occurrence(d, &frequency, interval);
+        }
+    }
+
+    out.sort_by_key(|i| i.date);
+    Ok(out)
 }

@@ -20,3 +20,6 @@ storage/
 # Local testing files
 examples/
 backups/
+
+# Deploy
+deploy/

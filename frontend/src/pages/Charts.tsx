@@ -473,24 +473,6 @@ export default function Charts() {
   // Count of active rules with a scheduled next date (forecast).
   const upcomingCount = recurring.filter((r) => r.is_active && r.next_due_on).length
 
-  // KPIs: monthly recurring cost (global, filter-independent) and expected
-  // spend for the period (only when it reaches into the future).
-  const { data: monthlyCost } = useQuery({
-    queryKey: ['recurring-monthly-cost'],
-    queryFn: recurringApi.monthlyCost,
-  })
-  const todayStr = new Date().toLocaleDateString('en-CA') // YYYY-MM-DD (local)
-  const hasFuture = !!filters.dateTo && filters.dateTo >= todayStr
-  const { data: expected } = useQuery({
-    queryKey: ['dashboard-expected', filters.dateFrom, filters.dateTo],
-    queryFn: () =>
-      dashboardApi.expected({
-        date_from: filters.dateFrom || undefined,
-        date_to: filters.dateTo || undefined,
-      }),
-    enabled: hasFuture,
-  })
-
   const banks = [...new Set(sources.map((s) => s.bank))].sort()
 
   // The missing-sources alert is month-specific: only show it when the whole
@@ -564,33 +546,6 @@ export default function Charts() {
                 <p className="text-xs text-zinc-500">Recorrentes</p>
                 <p className="text-lg font-semibold tabular-nums text-cyan-400">{upcomingCount}</p>
               </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-                <p className="text-xs text-zinc-500">
-                  Recorrência mensal <span className="text-zinc-600">(global)</span>
-                </p>
-                <p className="text-lg font-semibold tabular-nums">
-                  {fmtCents(monthlyCost?.monthly_cents ?? 0)}
-                  <span className="text-xs font-normal text-zinc-500">/mês</span>
-                </p>
-                <p className="text-[11px] text-zinc-600">
-                  {monthlyCost?.rule_count ?? 0} regras ativas
-                </p>
-              </div>
-              {hasFuture && (
-                <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-                  <p className="text-xs text-zinc-500">Gastos esperados</p>
-                  <p className="text-lg font-semibold tabular-nums text-amber-300">
-                    {fmtCents(expected?.total_cents ?? 0)}
-                  </p>
-                  <p className="text-[11px] text-zinc-600">
-                    parcelas {fmtCents(expected?.installments_cents ?? 0)} · recorrentes{' '}
-                    {fmtCents(expected?.recurring_cents ?? 0)}
-                  </p>
-                </div>
-              )}
             </div>
 
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">

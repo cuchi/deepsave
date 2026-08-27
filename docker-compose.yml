@@ -45,9 +45,13 @@ services:
       DATABASE_URL: postgres://deepsave:deepsave@postgres:5432/deepsave
       PORT: "8080"
       STATIC_DIR: /app/dist
-      SESSION_SECRET: deepsave-dev-secret-change-me-0123456789
-      APP_PASSWORD: deepsave
+      # Values come from the local .env (gitignored) — never hardcoded here.
+      # `:?` fails loudly if the var is missing instead of silently passing "".
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET not set in .env}
+      APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD not set in .env}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Send the session cookie only over HTTPS (set true in .env for the public deploy)
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # DEEPSEEK_BASE_URL: https://api.deepseek.com
     ports:
       - "8080:8080"

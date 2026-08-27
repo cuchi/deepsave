@@ -9,6 +9,8 @@ pub struct Config {
     pub password_hash: Option<String>,
     /// Plaintext password (from `APP_PASSWORD`), hashed at startup if no hash is set.
     pub password_plain: Option<String>,
+    /// Set the session cookie `Secure` flag (requires HTTPS at the reverse proxy).
+    pub cookie_secure: bool,
     /// Directory containing the built frontend to serve (SPA).
     pub static_dir: String,
     /// Directory where uploaded documents are stored.
@@ -44,6 +46,10 @@ impl Config {
         let password_plain = std::env::var("APP_PASSWORD")
             .ok()
             .filter(|s| !s.is_empty());
+        let cookie_secure = std::env::var("COOKIE_SECURE")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let static_dir = std::env::var("STATIC_DIR")
             .ok()
             .filter(|s| !s.is_empty())
@@ -86,6 +92,7 @@ impl Config {
             session_secret,
             password_hash,
             password_plain,
+            cookie_secure,
             static_dir,
             storage_dir,
             deepseek_api_key,

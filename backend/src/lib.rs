@@ -18,12 +18,13 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tower_cookies::{CookieManagerLayer, Key};
-use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+use crate::routes::auth::LoginLimiter;
 use services::ai::AiClient;
 
 #[derive(Clone)]
@@ -33,6 +34,10 @@ pub struct AppState {
     pub storage_dir: PathBuf,
     pub ai: AiClient,
     pub coverage_months: u32,
+    /// Set the session cookie `Secure` flag (requires HTTPS at the reverse proxy).
+    pub cookie_secure: bool,
+    /// In-memory brute-force guard for the login endpoint.
+    pub login_limiter: Arc<LoginLimiter>,
     password_hash: String,
 }
 
@@ -130,6 +135,8 @@ pub async fn run() -> anyhow::Result<()> {
         password_hash,
         ai,
         coverage_months: config.coverage_months,
+        cookie_secure: config.cookie_secure,
+        login_limiter: Arc::new(LoginLimiter::default()),
     };
 
     let protected = Router::new()
@@ -210,6 +217,8 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/dashboard/daily", get(routes::dashboard::daily))
         .route("/dashboard/tags", get(routes::dashboard::tags))
         .route("/dashboard/expected", get(routes::dashboard::expected))
+        .route("/dashboard/forecast", get(routes::dashboard::forecast))
+        .route("/dashboard/upcoming", get(routes::dashboard::upcoming))
         .route("/sources", get(routes::sources::list))
         .route("/sources/{id}", patch(routes::sources::update))
         .route("/coverage", get(routes::sources::coverage))
@@ -229,7 +238,6 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/api/auth/me", get(routes::auth::me))
         .nest("/api", protected)
         .layer(CookieManagerLayer::new())
-        .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
         .fallback_service(serve_dir);
@@ -237,7 +245,11 @@ pub async fn run() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!("listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

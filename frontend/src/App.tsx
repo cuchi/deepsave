@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { authApi } from './api/client'
 import Login from './pages/Login'
 import Charts from './pages/Charts'
+import Forecast from './pages/Forecast'
 import Lista from './pages/Lista'
 import Upload from './pages/Upload'
 import Review from './pages/Review'
@@ -36,6 +37,7 @@ export default function App() {
       />
       <Route element={authed ? <Layout /> : <Navigate to="/login" replace />}>
         <Route path="/" element={<Charts />} />
+        <Route path="/forecast" element={<Forecast />} />
         <Route path="/lista" element={<Lista />} />
         <Route path="/categories" element={<Navigate to="/memory" replace />} />
         <Route path="/upload" element={<Upload />} />

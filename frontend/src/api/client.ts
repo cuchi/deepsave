@@ -261,6 +261,22 @@ export interface ExpectedSpend {
   total_cents: number
 }
 
+export interface ForecastPoint {
+  month: string
+  installments_cents: number
+  recurring_cents: number
+  total_cents: number
+}
+
+export interface UpcomingItem {
+  date: string
+  kind: 'parcel' | 'recurring'
+  description: string
+  category_name: string | null
+  amount_cents: number
+  progress: string | null
+}
+
 export const dashboardApi = {
   async get(params: DashboardParams = {}): Promise<DashboardData> {
     return (await api.get<DashboardData>('/dashboard', { params })).data
@@ -281,6 +297,14 @@ export const dashboardApi = {
   /** Expected spend for a future period (installments + recurring). */
   async expected(params: DashboardParams = {}): Promise<ExpectedSpend> {
     return (await api.get<ExpectedSpend>('/dashboard/expected', { params })).data
+  },
+  /** Expected spend per month for the next N months. */
+  async forecast(months = 3): Promise<ForecastPoint[]> {
+    return (await api.get<ForecastPoint[]>('/dashboard/forecast', { params: { months } })).data
+  },
+  /** Flat, dated feed of the next obligations within `days`. */
+  async upcoming(days = 90): Promise<UpcomingItem[]> {
+    return (await api.get<UpcomingItem[]>('/dashboard/upcoming', { params: { days } })).data
   },
 }
 

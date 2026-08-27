@@ -180,3 +180,18 @@ Backend: `GET /api/dashboard/daily?stack_by=category|none` and
   in-progress series + future recurring occurrences for a period, dated ≥ today
   (expenses only). Both KPIs shown as cards on Gráficos ("Gastos esperados" only when
   the period reaches the future). Live backfill: 283 items → 168 series.
+
+### M19 — Gráficos split: Gastos × Previsão
+Gastos (`/`) keeps all spent charts + full filters; the two KPI cards moved to the
+new **Previsão** page (`/forecast`), which gained real forecast content:
+- Horizon selector (30/60/90/180 dias, default 90) shared by all blocks.
+- KPI cards: **Recorrência mensal** (global) + **Gastos esperados** (horizon; computed
+  from the upcoming feed).
+- **Monthly forecast chart** (ECharts stacked bar — parcelas vs recorrentes) via
+  `GET /api/dashboard/forecast?months=N`.
+- **Breakdown table** grouped by month with per-month subtotals, type badge
+  (Parcela x/N / Recorrente), category, sorted by date, via
+  `GET /api/dashboard/upcoming?days=N`.
+- "Estimativa" note (equal parcels, C6-only detection, active rules).
+Backend: shared `future_events` refactor (expected/forecast/upcoming all derive from
+it); 2 new integration tests.
