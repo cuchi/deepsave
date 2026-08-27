@@ -4,6 +4,7 @@ import {
   currentYearRange,
   daysAgoRange,
   lastCompleteMonthRange,
+  lastYearRange,
   toIso,
 } from '../lib/format'
 
@@ -19,10 +20,15 @@ const PRESETS: [string, () => { from: string; to: string }][] = [
   ['Últimos 7 dias', () => daysAgoRange(7)],
   ['Últimos 30 dias', () => daysAgoRange(30)],
   ['Últimos 90 dias', () => daysAgoRange(90)],
+  ['Últimos 6 meses', () => daysAgoRange(180)],
+  ['Últimos 12 meses', () => daysAgoRange(365)],
   ['Este ano', currentYearRange],
+  ['Ano passado', lastYearRange],
 ]
 
 const WEEKDAYS = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'] // Sun-first, pt-BR
+const MONTHS_SHORT = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+const pad = (n: number) => String(n).padStart(2, '0')
 
 function dayShort(ymd: string): string {
   return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`
@@ -34,6 +40,12 @@ function dayFull(ymd: string): string {
 
 function monthName(y: number, m: number): string {
   return new Date(y, m, 1).toLocaleDateString('pt-BR', { month: 'long' })
+}
+
+/** Last day (YYYY-MM-DD) of the month `ym` (YYYY-MM). */
+function lastDay(ym: string): string {
+  const [y, m] = ym.split('-').map(Number)
+  return `${ym}-${pad(new Date(y, m, 0).getDate())}`
 }
 
 function MonthGrid({
@@ -107,35 +119,54 @@ function MonthGrid({
 
 export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
   const [open, setOpen] = useState(false)
+  const [mode, setMode] = useState<'days' | 'months'>('days')
   const [view, setView] = useState(() => {
     const base = dateFrom || toIso(new Date())
     return { y: Number(base.slice(0, 4)), m: Number(base.slice(5, 7)) - 1 }
   })
+  const [year, setYear] = useState(() => view.y)
   const [start, setStart] = useState(dateFrom)
   const [end, setEnd] = useState(dateTo)
   const [hover, setHover] = useState<string | null>(null)
+  const [hoverMonth, setHoverMonth] = useState<string | null>(null)
 
   const openPopup = () => {
     setStart(dateFrom)
     setEnd(dateTo)
     setHover(null)
+    setHoverMonth(null)
     const base = dateFrom || toIso(new Date())
     setView({ y: Number(base.slice(0, 4)), m: Number(base.slice(5, 7)) - 1 })
+    setYear(Number(base.slice(0, 4)))
     setOpen(true)
   }
 
   const clickDay = (d: string) => {
     if (!start || end) {
-      // Start a new selection.
       setStart(d)
       setEnd('')
     } else if (d < start) {
-      // Picked a day before the start: swap.
       setStart(d)
       setEnd(start)
     } else {
       setEnd(d)
     }
+  }
+
+  // Month-level selection: start = 1st day, end = last day of the chosen months.
+  const clickMonth = (ym: string) => {
+    const [y, m] = ym.split('-').map(Number)
+    if (!start || end) {
+      setStart(`${ym}-01`)
+      setEnd('')
+    } else if (ym < start.slice(0, 7)) {
+      setStart(`${ym}-01`)
+      setEnd(lastDay(start.slice(0, 7)))
+    } else {
+      setEnd(lastDay(ym))
+    }
+    setView({ y, m: m - 1 })
+    setYear(y)
   }
 
   const apply = () => {
@@ -152,6 +183,11 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
     onChange(from, to)
     setOpen(false)
   }
+  const switchMode = (m: 'days' | 'months') => {
+    setMode(m)
+    setHover(null)
+    setHoverMonth(null)
+  }
 
   const label = !dateFrom && !dateTo
     ? 'Todo o histórico'
@@ -166,6 +202,9 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
   const prev = () => setView((v) => (v.m === 0 ? { y: v.y - 1, m: 11 } : { y: v.y, m: v.m - 1 }))
   const next = () => setView((v) => (v.m === 11 ? { y: v.y + 1, m: 0 } : { y: v.y, m: v.m + 1 }))
   const second = view.m === 11 ? { y: view.y + 1, m: 0 } : { y: view.y, m: view.m + 1 }
+
+  const startYm = start ? start.slice(0, 7) : ''
+  const endYm = end ? end.slice(0, 7) : ''
 
   return (
     <div className="relative sm:col-span-2">
@@ -186,7 +225,7 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-full z-20 mt-1 w-[min(660px,calc(100vw-2rem))] rounded-lg border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
+          <div className="absolute left-0 top-full z-20 mt-1 w-[min(680px,calc(100vw-2rem))] rounded-lg border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
             <div className="grid gap-4 sm:grid-cols-[150px_1fr]">
               {/* Presets */}
               <div className="space-y-0.5">
@@ -198,7 +237,7 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
                       const r = fn()
                       preset(r.from, r.to)
                     }}
-                    className="block w-full rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                    className="block w-full rounded px-2 py-1 text-left text-xs text-zinc-300 hover:bg-zinc-800"
                   >
                     {name}
                   </button>
@@ -206,7 +245,7 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
                 <button
                   type="button"
                   onClick={clear}
-                  className="block w-full rounded px-2 py-1.5 text-left text-xs text-red-400/90 hover:bg-zinc-800"
+                  className="block w-full rounded px-2 py-1 text-left text-xs text-red-400/90 hover:bg-zinc-800"
                 >
                   Todo o histórico
                 </button>
@@ -215,44 +254,125 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
               {/* Calendar */}
               <div>
                 <div className="mb-2 flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={prev}
-                    className="px-2 text-zinc-400 hover:text-zinc-100"
-                  >
-                    ‹
-                  </button>
-                  <span className="text-xs capitalize text-zinc-400">
-                    {monthName(view.y, view.m)} · {monthName(second.y, second.m)}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={next}
-                    className="px-2 text-zinc-400 hover:text-zinc-100"
-                  >
-                    ›
-                  </button>
+                  <div className="flex gap-1 rounded-md bg-zinc-800 p-0.5">
+                    {(['days', 'months'] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => switchMode(m)}
+                        className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                          mode === m
+                            ? 'bg-zinc-100 text-zinc-900'
+                            : 'text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        {m === 'days' ? 'Dias' : 'Meses'}
+                      </button>
+                    ))}
+                  </div>
+                  {mode === 'days' ? (
+                    <div className="flex items-center">
+                      <button
+                        type="button"
+                        onClick={prev}
+                        className="px-2 text-zinc-400 hover:text-zinc-100"
+                      >
+                        ‹
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setYear(view.y)
+                          switchMode('months')
+                        }}
+                        className="text-xs capitalize text-zinc-400 hover:text-zinc-200"
+                        title="Selecionar por meses"
+                      >
+                        {monthName(view.y, view.m)} · {monthName(second.y, second.m)}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={next}
+                        className="px-2 text-zinc-400 hover:text-zinc-100"
+                      >
+                        ›
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center">
+                      <button
+                        type="button"
+                        onClick={() => setYear((y) => y - 1)}
+                        className="px-2 text-zinc-400 hover:text-zinc-100"
+                      >
+                        ‹
+                      </button>
+                      <span className="text-xs text-zinc-400">{year}</span>
+                      <button
+                        type="button"
+                        onClick={() => setYear((y) => y + 1)}
+                        className="px-2 text-zinc-400 hover:text-zinc-100"
+                      >
+                        ›
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <MonthGrid
-                    y={view.y}
-                    m={view.m}
-                    start={start}
-                    end={end}
-                    hover={hover}
-                    onDay={clickDay}
-                    onHover={setHover}
-                  />
-                  <MonthGrid
-                    y={second.y}
-                    m={second.m}
-                    start={start}
-                    end={end}
-                    hover={hover}
-                    onDay={clickDay}
-                    onHover={setHover}
-                  />
-                </div>
+
+                {mode === 'days' ? (
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <MonthGrid
+                      y={view.y}
+                      m={view.m}
+                      start={start}
+                      end={end}
+                      hover={hover}
+                      onDay={clickDay}
+                      onHover={setHover}
+                    />
+                    <MonthGrid
+                      y={second.y}
+                      m={second.m}
+                      start={start}
+                      end={end}
+                      hover={hover}
+                      onDay={clickDay}
+                      onHover={setHover}
+                    />
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-1">
+                    {MONTHS_SHORT.map((name, i) => {
+                      const ym = `${year}-${pad(i + 1)}`
+                      const isSel = ym === startYm || ym === endYm
+                      const inSel = startYm && endYm && ym > startYm && ym < endYm
+                      const inHover =
+                        startYm &&
+                        !endYm &&
+                        hoverMonth &&
+                        ym !== startYm &&
+                        ((ym > startYm && ym < hoverMonth) || (ym < startYm && ym > hoverMonth))
+                      return (
+                        <button
+                          key={ym}
+                          type="button"
+                          onClick={() => clickMonth(ym)}
+                          onMouseEnter={() => setHoverMonth(ym)}
+                          onMouseLeave={() => setHoverMonth(null)}
+                          className={`flex h-9 items-center justify-center rounded text-xs transition-colors ${
+                            isSel
+                              ? 'bg-zinc-100 font-semibold text-zinc-900'
+                              : inSel || inHover
+                                ? 'bg-zinc-700/70 text-zinc-100'
+                                : 'text-zinc-300 hover:bg-zinc-800'
+                          }`}
+                        >
+                          {name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             </div>
 

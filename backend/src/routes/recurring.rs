@@ -14,15 +14,16 @@ use crate::models::RecurringRule;
 use crate::services::recurring;
 use crate::AppState;
 
-/// Base rule columns (no derived fields).
-const RULE_BASE: &str = "r.id, r.name, r.amount_cents, r.currency, r.category_id, \
-     c.name AS category_name, r.frequency, r.interval, r.day_of_month, r.next_due_on, \
-     r.is_active, r.source, r.created_at, r.updated_at";
+/// Base rule columns (no derived fields). `category_id`/`category_name` are
+/// derived placeholders — filled in by [`fill_derived`] from linked occurrences.
+const RULE_BASE: &str = "r.id, r.name, r.amount_cents, r.currency, \
+     NULL::uuid AS category_id, NULL::text AS category_name, r.frequency, r.interval, r.day_of_month, \
+     r.next_due_on, r.is_active, r.source, r.created_at, r.updated_at";
 
 /// Same columns without the `r.` alias (for INSERT/UPDATE RETURNING).
-const RULE_BASE_UNALIASED: &str = "id, name, amount_cents, currency, category_id, \
-     NULL::text AS category_name, frequency, interval, day_of_month, next_due_on, \
-     is_active, source, created_at, updated_at";
+const RULE_BASE_UNALIASED: &str = "id, name, amount_cents, currency, \
+     NULL::uuid AS category_id, NULL::text AS category_name, frequency, interval, day_of_month, \
+     next_due_on, is_active, source, created_at, updated_at";
 
 /// Row shape for the unaliased base columns (INSERT/UPDATE RETURNING).
 #[derive(Debug, FromRow)]
@@ -89,7 +90,6 @@ pub struct RecurringInput {
     pub name: String,
     /// Signed cents (negative = expense).
     pub amount_cents: i64,
-    pub category_id: Option<Uuid>,
     /// 'weekly' | 'monthly' | 'yearly'
     pub frequency: String,
     #[serde(default = "default_interval")]
@@ -124,24 +124,46 @@ fn clamp_next_due(next: Option<NaiveDate>) -> Option<NaiveDate> {
     next.map(|d| if d < today { today } else { d })
 }
 
-/// Fill derived fields (tags union, tags_conflict, effective next date + days_until)
-/// for a batch of rules with a single tags query.
+/// Fill derived fields (tags union, tags_conflict, category from the most recent
+/// linked occurrence, effective next date + days_until) for a batch of rules with
+/// a single items query.
 async fn fill_derived(pool: &PgPool, rules: &mut [RecurringRule]) -> Result<(), AppError> {
     let ids: Vec<Uuid> = rules.iter().map(|r| r.id).collect();
     let mut union: HashMap<Uuid, BTreeSet<String>> = HashMap::new();
     let mut sets: HashMap<Uuid, HashSet<Vec<String>>> = HashMap::new();
+    // Most recent occurrence's category per rule — rows are ordered newest-first,
+    // so the first non-null category seen per rule is the latest one.
+    let mut latest_cat: HashMap<Uuid, Uuid> = HashMap::new();
     if !ids.is_empty() {
-        let rows: Vec<(Uuid, Vec<String>)> = sqlx::query_as(
-            "SELECT recurring_id, tags FROM items
-             WHERE recurring_id = ANY($1) AND status = 'confirmed' AND cardinality(tags) > 0",
+        let rows: Vec<(Uuid, Vec<String>, Option<Uuid>)> = sqlx::query_as(
+            "SELECT recurring_id, tags, category_id FROM items
+             WHERE recurring_id = ANY($1) AND status = 'confirmed'
+               AND (cardinality(tags) > 0 OR category_id IS NOT NULL)
+             ORDER BY occurred_on DESC, created_at DESC",
         )
         .bind(&ids)
         .fetch_all(pool)
         .await?;
-        for (rid, tags) in rows {
+        for (rid, tags, cat) in rows {
             union.entry(rid).or_default().extend(tags.iter().cloned());
             sets.entry(rid).or_default().insert(tags);
+            if let Some(c) = cat {
+                latest_cat.entry(rid).or_insert(c);
+            }
         }
+    }
+
+    let cat_ids: Vec<Uuid> = latest_cat.values().copied().collect();
+    let mut cat_names: HashMap<Uuid, String> = HashMap::new();
+    if !cat_ids.is_empty() {
+        cat_names = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id, name FROM categories WHERE id = ANY($1)",
+        )
+        .bind(&cat_ids)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect();
     }
 
     let today = Utc::now().date_naive();
@@ -151,6 +173,8 @@ async fn fill_derived(pool: &PgPool, rules: &mut [RecurringRule]) -> Result<(), 
             .map(|s| s.into_iter().collect())
             .unwrap_or_default();
         r.tags_conflict = sets.get(&r.id).map(|s| s.len() > 1).unwrap_or(false);
+        r.category_id = latest_cat.get(&r.id).copied();
+        r.category_name = r.category_id.and_then(|id| cat_names.get(&id).cloned());
         if let Some(due) = r.next_due_on {
             let eff = recurring::advance_next_due(due, &r.frequency, r.interval, today);
             r.next_due_on = Some(eff);
@@ -165,7 +189,7 @@ async fn fill_derived(pool: &PgPool, rules: &mut [RecurringRule]) -> Result<(), 
 fn select_sql(where_clause: &str) -> String {
     format!(
         "SELECT {RULE_BASE}, {RULE_ENTRIES}, {RULE_DERIVED} \
-         FROM recurring_rules r LEFT JOIN categories c ON c.id = r.category_id {where_clause}"
+         FROM recurring_rules r {where_clause}"
     )
 }
 
@@ -197,14 +221,13 @@ pub async fn create(
 
     let base = sqlx::query_as::<_, RuleBase>(sqlx::AssertSqlSafe(format!(
         "INSERT INTO recurring_rules
-           (name, amount_cents, currency, category_id, frequency, interval,
+           (name, amount_cents, currency, frequency, interval,
             day_of_month, next_due_on, is_active, source)
-         VALUES ($1, $2, 'BRL', $3, $4, $5, $6, $7, $8, 'manual')
+         VALUES ($1, $2, 'BRL', $3, $4, $5, $6, $7, 'manual')
          RETURNING {RULE_BASE_UNALIASED}"
     )))
     .bind(&name)
     .bind(input.amount_cents)
-    .bind(input.category_id)
     .bind(&input.frequency)
     .bind(input.interval)
     .bind(input.day_of_month)
@@ -240,14 +263,13 @@ pub async fn update(
 
     let base = sqlx::query_as::<_, RuleBase>(sqlx::AssertSqlSafe(format!(
         "UPDATE recurring_rules
-         SET name = $1, amount_cents = $2, category_id = $3, frequency = $4, interval = $5,
-             day_of_month = $6, next_due_on = $7, is_active = $8, updated_at = now()
-         WHERE id = $9
+         SET name = $1, amount_cents = $2, frequency = $3, interval = $4,
+             day_of_month = $5, next_due_on = $6, is_active = $7, updated_at = now()
+         WHERE id = $8
          RETURNING {RULE_BASE_UNALIASED}"
     )))
     .bind(&name)
     .bind(input.amount_cents)
-    .bind(input.category_id)
     .bind(&input.frequency)
     .bind(input.interval)
     .bind(input.day_of_month)
@@ -333,28 +355,37 @@ pub struct ProfileQuery {
     pub name: Option<String>,
 }
 
-/// Distinct merchant names (items + merchant memory) for autocomplete.
-pub async fn merchants(
-    State(state): State<AppState>,
-    Query(q): Query<NameQuery>,
-) -> Result<Json<Vec<String>>, AppError> {
-    let q = q.q.unwrap_or_default().trim().to_string();
+/// Distinct names for the alias autocomplete (items + merchant memory). The item
+/// name is the merchant when present, else the description — the same source
+/// `link_item` matches against — so merchant-less bills like "PREST HAB" show up.
+pub async fn merchant_names(pool: &PgPool, q: &str) -> Result<Vec<String>, AppError> {
+    let q = q.trim().to_string();
     let mut names: Vec<String> = sqlx::query_scalar(
-        "SELECT merchant FROM items
-         WHERE merchant IS NOT NULL AND merchant <> '' AND merchant ILIKE '%' || $1 || '%'
+        "SELECT COALESCE(NULLIF(merchant, ''), description) FROM items
+         WHERE COALESCE(NULLIF(merchant, ''), description) ILIKE '%' || $1 || '%'
          UNION
          SELECT merchant FROM merchant_memory
          WHERE merchant <> '' AND merchant ILIKE '%' || $1 || '%'
          ORDER BY 1 LIMIT 25",
     )
     .bind(&q)
-    .fetch_all(&state.pool)
+    .fetch_all(pool)
     .await?;
-    // Raw item merchants and normalized memory merchants can both be present;
+    // Raw item names and normalized memory merchants can both be present;
     // dedupe case/accent-insensitively (keep the first, sorted variant).
     let mut seen = std::collections::HashSet::new();
     names.retain(|n| seen.insert(recurring::normalize_name(n)));
-    Ok(Json(names))
+    Ok(names)
+}
+
+/// Distinct merchant names (items + merchant memory) for autocomplete.
+pub async fn merchants(
+    State(state): State<AppState>,
+    Query(q): Query<NameQuery>,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(
+        merchant_names(&state.pool, q.q.as_deref().unwrap_or_default()).await?,
+    ))
 }
 
 /// Auto-derivation payload for the add flow — only meaningful when the name
@@ -387,7 +418,8 @@ pub async fn merchant_profile(
                 .as_deref()
                 .filter(|x| !x.trim().is_empty())
                 .unwrap_or(d);
-            recurring::normalize_name(text) == normalized
+            // Tolerant of a trailing amount in the name (varying payments).
+            recurring::matches_alias(text, &normalized)
         })
         .map(|(m, d, amount, date, cat, _)| (m, d, amount, date, cat))
         .collect();
@@ -427,6 +459,11 @@ pub async fn merchant_profile(
         }
     }
 
+    // Next due date: last occurrence advanced by the suggested window (never in
+    // the past) — used by the alias-click prefill in the rule form.
+    let next_due_on =
+        recurring::advance_next_due(last.3, &suggested_frequency, suggested_interval, Utc::now().date_naive());
+
     Ok(Json(json!({
         "merchant": name,
         "amount_cents": last.2,
@@ -435,6 +472,7 @@ pub async fn merchant_profile(
         "last_occurred_on": last.3,
         "suggested_frequency": suggested_frequency,
         "suggested_interval": suggested_interval,
+        "next_due_on": next_due_on,
     })))
 }
 
@@ -473,4 +511,46 @@ pub async fn occurrences(
             })
             .collect(),
     ))
+}
+
+// ---------- Monthly recurring cost KPI ----------
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct MonthlyCost {
+    /// Monthly-equivalent cost (cents) of all active expense rules.
+    pub monthly_cents: i64,
+    /// Number of active expense rules contributing.
+    pub rule_count: i64,
+}
+
+/// `GET /recurring/monthly-cost` — global KPI: the normalized monthly cost of
+/// all active recurring rules (weekly/yearly rules are normalized to months).
+/// Ignores all date/filter params on purpose.
+pub async fn monthly_cost(State(state): State<AppState>) -> Result<Json<MonthlyCost>, AppError> {
+    let rows: Vec<(i64, String, i32)> = sqlx::query_as(
+        "SELECT amount_cents, frequency, interval FROM recurring_rules WHERE is_active",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut total = 0.0f64;
+    let mut rule_count = 0i64;
+    for (amount_cents, frequency, interval) in rows {
+        if amount_cents >= 0 {
+            continue; // expenses only
+        }
+        let interval = interval.max(1) as f64;
+        let factor = match frequency.as_str() {
+            "weekly" => 52.0 / 12.0 / interval,
+            "monthly" => 1.0 / interval,
+            _ => 1.0 / (12.0 * interval), // yearly / fallback
+        };
+        total += amount_cents.unsigned_abs() as f64 * factor;
+        rule_count += 1;
+    }
+
+    Ok(Json(MonthlyCost {
+        monthly_cents: total.round() as i64,
+        rule_count,
+    }))
 }

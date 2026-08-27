@@ -7,6 +7,10 @@ use chrono::NaiveDate;
 #[derive(Debug, Clone)]
 pub struct ParsedItem {
     pub occurred_on: NaiveDate,
+    /// Original purchase date, when the source document carries it (C6 fatura,
+    /// Caixa fatura). Used to disambiguate identical installment purchases — it
+    /// is NOT persisted on items, only used at parse/series time.
+    pub purchase_date: Option<NaiveDate>,
     pub description: String,
     pub merchant: Option<String>,
     /// Signed cents (negative = expense / outflow).

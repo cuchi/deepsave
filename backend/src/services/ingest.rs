@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::models::DocumentRow;
 use crate::services::ai::{self, AiClient, AiExtraction};
 use crate::services::parsers::{caixa_card, csv, ParsedItem};
-use crate::services::{extract, linking, recurring, tags};
+use crate::services::{extract, linking, recurring, series, tags};
 
 /// Process a single document based on its file type.
 ///
@@ -53,6 +53,8 @@ async fn process_csv(pool: &PgPool, doc: &DocumentRow) -> Result<()> {
 
     let source = statement_source(doc);
     let ids = insert_parsed_items(pool, doc, source, &items).await?;
+    // Group installment lines into purchase series (across faturas).
+    series::assign_document(pool, doc, &items).await?;
     link_new_items(pool, &ids).await?;
 
     sqlx::query("UPDATE documents SET status = 'processed', processed_at = now() WHERE id = $1")
@@ -286,6 +288,7 @@ async fn process_pdf(pool: &PgPool, doc: &DocumentRow, ai: &AiClient) -> Result<
     if caixa_card::is_caixa_card_fatura(&text) {
         let (_billing_month, items) = caixa_card::parse(&text)?;
         let ids = insert_parsed_items(pool, doc, "card_statement", &items).await?;
+        series::assign_document(pool, doc, &items).await?;
         link_new_items(pool, &ids).await?;
         sqlx::query(
             "UPDATE documents SET status = 'processed', ocr_text = $1, processed_at = now() WHERE id = $2",

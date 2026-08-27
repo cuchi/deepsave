@@ -287,6 +287,8 @@ pub struct RecurringRule {
     pub name: String,
     pub amount_cents: i64,
     pub currency: String,
+    /// Derived from the most recent linked confirmed item (like tags) — rules no
+    /// longer carry their own category.
     pub category_id: Option<Uuid>,
     pub category_name: Option<String>,
     pub frequency: String,

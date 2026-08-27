@@ -101,6 +101,7 @@ fn parse_compras_line(line: &str, billing: NaiveDate) -> Option<ParsedItem> {
 
     Some(ParsedItem {
         occurred_on,
+        purchase_date: Some(occurred_on),
         description: description.clone(),
         merchant: Some(description),
         amount_cents: if is_credit { cents } else { -cents },

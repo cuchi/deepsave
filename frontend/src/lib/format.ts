@@ -50,3 +50,9 @@ export function currentYearRange(): { from: string; to: string } {
   const y = new Date().getFullYear()
   return { from: `${y}-01-01`, to: `${y}-12-31` }
 }
+
+/** Jan 1 to Dec 31 of the previous year. */
+export function lastYearRange(): { from: string; to: string } {
+  const y = new Date().getFullYear() - 1
+  return { from: `${y}-01-01`, to: `${y}-12-31` }
+}

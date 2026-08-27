@@ -165,3 +165,18 @@ Backend: `GET /api/dashboard/daily?stack_by=category|none` and
 1. **Recurring timing**: next occurrence auto-created a few days before `next_due_on` (default 3 days).
 2. **Recurring detection**: suggest after 2 repeats, require user confirmation.
 3. **Caixa**: PDF only (no CSV export).
+
+### M18 — Purchase series + forecast KPIs
+- **Purchase series** (`purchase_series` + `items.series_id`): installments are linked
+  across faturas by **re-parsing the stored documents** (the C6 fatura CSVs on disk /
+  stored PDF text). `ParsedItem` now carries the original `purchase_date` (was
+  discarded). Within a document, identical purchases split by purchase date; across
+  documents, series match by (source, description, count) + monthly cadence + purchase
+  date; ambiguous groups are skipped (never wrong, only conservative). `assign_document`
+  runs at ingest; a startup `backfill` (idempotent) reprocesses legacy documents.
+- **KPI — Recorrência mensal** (`GET /api/recurring/monthly-cost`): monthly-equivalent
+  cost of active rules (weekly × 52/12, yearly /12), expenses only, ignores filters.
+- **KPI — Gastos esperados** (`GET /api/dashboard/expected`): future installments of
+  in-progress series + future recurring occurrences for a period, dated ≥ today
+  (expenses only). Both KPIs shown as cards on Gráficos ("Gastos esperados" only when
+  the period reaches the future). Live backfill: 283 items → 168 series.

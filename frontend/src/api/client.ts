@@ -250,6 +250,17 @@ export interface TagTotal {
   total_cents: number
 }
 
+export interface MonthlyCost {
+  monthly_cents: number
+  rule_count: number
+}
+
+export interface ExpectedSpend {
+  installments_cents: number
+  recurring_cents: number
+  total_cents: number
+}
+
 export const dashboardApi = {
   async get(params: DashboardParams = {}): Promise<DashboardData> {
     return (await api.get<DashboardData>('/dashboard', { params })).data
@@ -266,6 +277,10 @@ export const dashboardApi = {
   /** Top tags by expense total (spend carrying each tag, overlap allowed). */
   async tags(params: DashboardParams = {}): Promise<TagTotal[]> {
     return (await api.get<TagTotal[]>('/dashboard/tags', { params })).data
+  },
+  /** Expected spend for a future period (installments + recurring). */
+  async expected(params: DashboardParams = {}): Promise<ExpectedSpend> {
+    return (await api.get<ExpectedSpend>('/dashboard/expected', { params })).data
   },
 }
 
@@ -396,7 +411,6 @@ export const memoryApi = {
 export interface RecurringInput {
   name: string
   amount_cents: number
-  category_id?: string | null
   frequency: string
   interval?: number
   day_of_month?: number | null
@@ -409,6 +423,9 @@ export interface RecurringInput {
 export const recurringApi = {
   async list(): Promise<RecurringRule[]> {
     return (await api.get<RecurringRule[]>('/recurring')).data
+  },
+  async monthlyCost(): Promise<MonthlyCost> {
+    return (await api.get<MonthlyCost>('/recurring/monthly-cost')).data
   },
   async create(input: RecurringInput): Promise<RecurringRule> {
     return (await api.post<RecurringRule>('/recurring', input)).data

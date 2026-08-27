@@ -133,6 +133,8 @@ export interface MerchantProfile {
   last_occurred_on: string
   suggested_frequency: string
   suggested_interval: number
+  /** Last occurrence advanced by the suggested window (never in the past). */
+  next_due_on: string | null
 }
 
 export interface TagUsage {

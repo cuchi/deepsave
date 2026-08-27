@@ -63,7 +63,7 @@ cd frontend && npm run build       # type-check + build frontend
   confirmations). Applying memory (`apply-memory` per item, `POST /memory/preview` + `/memory/apply`
   for bulk) sets the category (replace) **and adds** the remembered tags (never removes item tags).
   Tag rename/merge/delete cascade to items, recurring rules and merchant memory.
-- **Recurring items** live in `backend/src/services/recurring.rs` + `routes/recurring.rs`. Detection is suggestion-only (user confirms). Rules are **analytics-only — they never auto-create items** (avoids double-counting with statement items); `upcoming` is a pure forecast.
+- **Recurring items** live in `backend/src/services/recurring.rs` + `routes/recurring.rs`. Detection is suggestion-only (user confirms). Rules are **analytics-only — they never auto-create items** (avoids double-counting with statement items); `upcoming` is a pure forecast. Alias matching tolerates a trailing amount in the item name (`matches_alias`), so one alias covers varying payments like "PREST HAB 1847,32" / "PREST HAB 1832,10".
 
 ## Before committing
 

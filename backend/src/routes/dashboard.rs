@@ -416,3 +416,125 @@ pub async fn tags_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<TagTotal>, A
     .await?;
     Ok(rows)
 }
+
+// ---------- Expected spend (future forecast) ----------
+
+#[derive(Debug, Deserialize)]
+pub struct ExpectedQuery {
+    pub date_from: Option<NaiveDate>,
+    pub date_to: Option<NaiveDate>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExpectedSpend {
+    pub installments_cents: i64,
+    pub recurring_cents: i64,
+    pub total_cents: i64,
+}
+
+/// `GET /dashboard/expected` — expected spend for a period: future installments
+/// of in-progress purchase series + future occurrences of active recurring
+/// rules. Only dated `>= today` (what's still expected); expenses only.
+pub async fn expected(
+    State(state): State<AppState>,
+    Query(q): Query<ExpectedQuery>,
+) -> Result<Json<ExpectedSpend>, AppError> {
+    Ok(Json(expected_data(&state.pool, q.date_from, q.date_to).await?))
+}
+
+pub async fn expected_data(
+    pool: &PgPool,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
+) -> Result<ExpectedSpend, AppError> {
+    let today = chrono::Utc::now().date_naive();
+    let from = date_from.map(|d| d.max(today)).unwrap_or(today);
+    let to = date_to.unwrap_or(today);
+    if to < from {
+        return Ok(ExpectedSpend {
+            installments_cents: 0,
+            recurring_cents: 0,
+            total_cents: 0,
+        });
+    }
+
+    let installments_cents = expected_installments(pool, from, to).await?;
+    let recurring_cents = expected_recurring(pool, from, to, today).await?;
+    Ok(ExpectedSpend {
+        installments_cents,
+        recurring_cents,
+        total_cents: installments_cents + recurring_cents,
+    })
+}
+
+/// Future parcels of in-progress series: parcel k+1 in month M+1 after the
+/// latest billed parcel (month M). Uses the latest parcel amount.
+async fn expected_installments(pool: &PgPool, from: NaiveDate, to: NaiveDate) -> Result<i64, AppError> {
+    let rows: Vec<(Uuid, i32, i32, NaiveDate, i64)> = sqlx::query_as(
+        "SELECT s.id, s.installment_count, st.max_inst, st.last_date, p.amount_cents
+         FROM purchase_series s
+         JOIN LATERAL (
+           SELECT MAX(i.installment)::int AS max_inst, MAX(i.occurred_on) AS last_date
+           FROM items i WHERE i.series_id = s.id
+         ) st ON true
+         JOIN LATERAL (
+           SELECT i.amount_cents FROM items i
+           WHERE i.series_id = s.id ORDER BY i.installment DESC, i.occurred_on DESC LIMIT 1
+         ) p ON true
+         WHERE st.max_inst IS NOT NULL AND st.max_inst < s.installment_count",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut total = 0i64;
+    for (_sid, count, max_inst, last_date, amount_cents) in rows {
+        if amount_cents >= 0 {
+            continue;
+        }
+        for k in (max_inst + 1)..=count {
+            let months = (k - max_inst) as u32;
+            let Some(d) = last_date.checked_add_months(chrono::Months::new(months)) else {
+                continue;
+            };
+            if d >= from && d <= to {
+                total += amount_cents.unsigned_abs() as i64;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Future occurrences of active expense rules, anchored at `next_due_on`
+/// (advanced to >= today), stepped by the rule's window.
+async fn expected_recurring(pool: &PgPool, from: NaiveDate, to: NaiveDate, today: NaiveDate) -> Result<i64, AppError> {
+    let rows: Vec<(i64, String, i32, NaiveDate)> = sqlx::query_as(
+        "SELECT amount_cents, frequency, interval, next_due_on
+         FROM recurring_rules WHERE is_active AND amount_cents < 0 AND next_due_on IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut total = 0i64;
+    for (amount_cents, frequency, interval, next_due) in rows {
+        let mut d = crate::services::recurring::advance_next_due(next_due, &frequency, interval, today);
+        for _ in 0..1200 {
+            if d > to {
+                break;
+            }
+            if d >= from {
+                total += amount_cents.unsigned_abs() as i64;
+            }
+            d = step_occurrence(d, &frequency, interval);
+        }
+    }
+    Ok(total)
+}
+
+fn step_occurrence(d: NaiveDate, frequency: &str, interval: i32) -> NaiveDate {
+    let interval = interval.max(1) as u32;
+    match frequency {
+        "weekly" => d + chrono::Duration::days(7 * interval as i64),
+        "monthly" => d.checked_add_months(chrono::Months::new(interval)).unwrap_or(d),
+        _ => d.checked_add_months(chrono::Months::new(interval * 12)).unwrap_or(d),
+    }
+}

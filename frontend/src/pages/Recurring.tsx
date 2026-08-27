@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { categoriesApi, recurringApi, type RecurringInput } from '../api/client'
 import type { Category, RecurringRule } from '../lib/types'
@@ -22,27 +22,6 @@ function windowLabel(frequency: string, interval: number): string {
   const unit =
     frequency === 'weekly' ? 'semanas' : frequency === 'monthly' ? 'meses' : 'anos'
   return `a cada ${interval} ${unit}`
-}
-
-/** Advance an ISO date by the window until it is >= today (preview-time math). */
-function advanceDate(iso: string, frequency: string): string {
-  const d = new Date(iso + 'T00:00:00')
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  let guard = 0
-  while (d < today && guard++ < 1200) {
-    if (frequency === 'weekly') d.setDate(d.getDate() + 7)
-    else if (frequency === 'monthly') d.setMonth(d.getMonth() + 1)
-    else d.setFullYear(d.getFullYear() + 1)
-  }
-  return d.toISOString().slice(0, 10)
-}
-
-function daysUntil(iso: string): number {
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const d = new Date(iso + 'T00:00:00')
-  return Math.round((d.getTime() - today.getTime()) / 86_400_000)
 }
 
 function nextDueLabel(next: string | null, days: number | null): string {
@@ -97,8 +76,10 @@ function MerchantAutocomplete({
   const suggestions = data.filter((m) => !exclude.includes(m))
 
   const commit = (name: string) => {
+    // The picker's own onChange handles clearing when needed (e.g. NameEntryEditor
+    // clears its input after adding a chip); here we only report the pick so the
+    // create-flow name field keeps the picked value.
     onPick(name)
-    onChange('')
     setOpen(false)
   }
 
@@ -165,10 +146,13 @@ function NameEntryEditor({
   aliases,
   isolated,
   onChange,
+  onChipPick,
 }: {
   aliases: string[]
   isolated: string[]
   onChange: (aliases: string[], isolated: string[]) => void
+  /** Clicking a chip prefills the form values from that name's merchant profile. */
+  onChipPick?: (name: string) => void
 }) {
   const [input, setInput] = useState('')
   const [asAlias, setAsAlias] = useState(true)
@@ -189,7 +173,13 @@ function NameEntryEditor({
       <span title={kind === 'alias' ? 'alias (auto-match)' : 'caso isolado (não auto)'}>
         {kind === 'alias' ? '↻' : '¹'}
       </span>
-      {name}
+      <span
+        className="cursor-pointer hover:text-zinc-100"
+        title="Clique para preencher valor, janela e próxima data a partir deste nome"
+        onClick={() => onChipPick?.(name)}
+      >
+        {name}
+      </span>
       <button
         type="button"
         onClick={() =>
@@ -233,7 +223,8 @@ function NameEntryEditor({
       </label>
       <p className="text-[11px] text-zinc-600">
         Nomes são validados no salvamento: devem existir nos dados e aliases não podem
-        se repetir entre regras.
+        se repetir entre regras. Um alias pode ignorar o valor no final do nome —
+        ex.: “prest hab” identifica “PREST HAB 1.847,32”.
       </p>
     </div>
   )
@@ -249,7 +240,6 @@ function RuleCard({
   onEdit,
   onDelete,
   onToggleActive,
-  preview = false,
 }: {
   rule: RecurringRule
   categories: Category[]
@@ -258,7 +248,6 @@ function RuleCard({
   onEdit: () => void
   onDelete: () => void
   onToggleActive: () => void
-  preview?: boolean
 }) {
   const cat = rule.category_id ? categories.find((c) => c.id === rule.category_id) : undefined
   return (
@@ -318,26 +307,22 @@ function RuleCard({
         <span className="shrink-0 text-xs text-zinc-500">
           próx: {nextDueLabel(rule.next_due_on, rule.days_until)}
         </span>
-        {!preview && (
-          <>
-            <button
-              onClick={onToggleActive}
-              className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200"
-              title={rule.is_active ? 'Pausar regra' : 'Ativar regra'}
-            >
-              {rule.is_active ? 'pausar' : 'ativar'}
-            </button>
-            <button onClick={onEdit} className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200">
-              editar
-            </button>
-            <button
-              onClick={onDelete}
-              className="shrink-0 text-xs text-zinc-500 hover:text-red-400"
-            >
-              apagar
-            </button>
-          </>
-        )}
+        <button
+          onClick={onToggleActive}
+          className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200"
+          title={rule.is_active ? 'Pausar regra' : 'Ativar regra'}
+        >
+          {rule.is_active ? 'pausar' : 'ativar'}
+        </button>
+        <button onClick={onEdit} className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200">
+          editar
+        </button>
+        <button
+          onClick={onDelete}
+          className="shrink-0 text-xs text-zinc-500 hover:text-red-400"
+        >
+          apagar
+        </button>
       </div>
       {(rule.aliases.length > 0 || rule.isolated_cases.length > 0) && (
         <div className="mt-1 flex flex-wrap items-center gap-1 pl-5 text-[11px] text-zinc-600">
@@ -357,29 +342,163 @@ function RuleCard({
   )
 }
 
+// ---------- shared create/edit form ----------
+
+function RuleForm({
+  draft,
+  onChange,
+  busy,
+  error,
+  saveLabel,
+  onSave,
+  onCancel,
+}: {
+  draft: RuleDraft
+  onChange: (d: RuleDraft) => void
+  busy: boolean
+  error: string
+  saveLabel: string
+  onSave: () => void
+  onCancel: () => void
+}) {
+  const set = (patch: Partial<RuleDraft>) => onChange({ ...draft, ...patch })
+
+  /** Alias chip clicked → prefill amount/window/next date from that name. */
+  const pickAliasValues = async (name: string) => {
+    try {
+      const p = await recurringApi.merchantProfile(name)
+      onChange({
+        ...draft,
+        amount_cents: p.amount_cents,
+        frequency: p.suggested_frequency,
+        interval: p.suggested_interval ?? 1,
+        next_due_on: p.next_due_on ?? null,
+      })
+    } catch {
+      // Name without a profile (no items in the window) — nothing to prefill.
+    }
+  }
+
+  return (
+    <div className="rounded border border-zinc-700 bg-zinc-900 p-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <label className="mb-1 block text-xs text-zinc-500">Nome</label>
+          <input
+            value={draft.name}
+            onChange={(e) => set({ name: e.target.value })}
+            className="field w-full"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-zinc-500">Valor (R$)</label>
+          <input
+            value={Math.abs(draft.amount_cents) / 100}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value.replace(',', '.'))
+              const cents = Number.isNaN(v) ? 0 : Math.round(v * 100)
+              set({ amount_cents: -cents })
+            }}
+            inputMode="decimal"
+            className="field w-full"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-zinc-500">Janela</label>
+          <select
+            value={draft.frequency}
+            onChange={(e) => set({ frequency: e.target.value })}
+            className="field w-full"
+          >
+            {FREQ_OPTIONS.map(([v, l]) => (
+              <option key={v} value={v}>
+                {l}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-zinc-500">Próxima data</label>
+          <input
+            type="date"
+            value={draft.next_due_on ?? ''}
+            onChange={(e) => set({ next_due_on: e.target.value || null })}
+            className="field w-full"
+          />
+        </div>
+        <label className="flex items-end gap-1.5 pb-1 text-sm text-zinc-400">
+          <input
+            type="checkbox"
+            checked={draft.is_active}
+            onChange={(e) => set({ is_active: e.target.checked })}
+          />
+          ativa
+        </label>
+      </div>
+      <div className="mt-2">
+        <label className="mb-1 block text-xs text-zinc-500">Nomes (aliases / casos isolados)</label>
+        <NameEntryEditor
+          aliases={draft.aliases}
+          isolated={draft.isolated_cases}
+          onChange={(a, i) => set({ aliases: a, isolated_cases: i })}
+          onChipPick={pickAliasValues}
+        />
+      </div>
+      {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
+      <div className="mt-3 flex gap-2">
+        <button
+          onClick={onSave}
+          disabled={busy}
+          className="rounded bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 disabled:opacity-50"
+        >
+          {saveLabel}
+        </button>
+        <button onClick={onCancel} className="text-sm text-zinc-500 hover:text-zinc-200">
+          cancelar
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ---------- page ----------
 
-type Draft = RecurringRule
+/** Editable subset shared by the create and edit forms. */
+type RuleDraft = {
+  name: string
+  amount_cents: number
+  frequency: string
+  interval: number
+  next_due_on: string | null
+  is_active: boolean
+  aliases: string[]
+  isolated_cases: string[]
+}
+
+function emptyDraft(): RuleDraft {
+  return {
+    name: '',
+    amount_cents: 0,
+    frequency: 'yearly',
+    interval: 1,
+    next_due_on: null,
+    is_active: true,
+    aliases: [],
+    isolated_cases: [],
+  }
+}
 
 export default function Recurring() {
   const qc = useQueryClient()
   const { data: rules = [] } = useQuery({ queryKey: ['recurring'], queryFn: recurringApi.list })
   const { data: categories = [] } = useQuery({ queryKey: ['categories'], queryFn: categoriesApi.list })
 
-  // Add panel state.
-  const [addOpen, setAddOpen] = useState(false)
-  const [addName, setAddName] = useState('')
-  const [addWindow, setAddWindow] = useState('yearly')
-  const [addAmount, setAddAmount] = useState<number | null>(null)
-  const [addCategoryId, setAddCategoryId] = useState('')
-  const [addCategoryName, setAddCategoryName] = useState<string | null>(null)
-  const [addLastDate, setAddLastDate] = useState<string | null>(null)
-  const [addAliases, setAddAliases] = useState<string[]>([])
-  const [addBusy, setAddBusy] = useState(false)
+  // Create panel state: `null` = closed.
+  const [addDraft, setAddDraft] = useState<RuleDraft | null>(null)
   const [addError, setAddError] = useState('')
 
   // Edit state: a working copy of the rule being edited.
-  const [draft, setDraft] = useState<Draft | null>(null)
+  const [draft, setDraft] = useState<RecurringRule | null>(null)
   const [editError, setEditError] = useState('')
 
   // Expandable occurrences.
@@ -417,88 +536,28 @@ export default function Recurring() {
   })
 
   const resetAdd = () => {
-    setAddOpen(false)
-    setAddName('')
-    setAddWindow('yearly')
-    setAddAmount(null)
-    setAddCategoryId('')
-    setAddCategoryName(null)
-    setAddLastDate(null)
-    setAddAliases([])
-    setAddBusy(false)
+    setAddDraft(null)
     setAddError('')
-  }
-
-  const pickMerchant = async (name: string) => {
-    setAddName(name)
-    setAddBusy(true)
-    setAddError('')
-    try {
-      const p = await recurringApi.merchantProfile(name)
-      setAddAmount(p.amount_cents)
-      setAddCategoryId(p.category_id ?? '')
-      setAddCategoryName(p.category_name)
-      setAddLastDate(p.last_occurred_on)
-      setAddWindow(p.suggested_frequency)
-      setAddAliases([name])
-    } catch {
-      // 404: no profile — empty defaults, strict add flow (decided).
-      setAddAmount(null)
-      setAddCategoryId('')
-      setAddCategoryName(null)
-      setAddLastDate(null)
-      setAddAliases([])
-    } finally {
-      setAddBusy(false)
-    }
   }
 
   const saveAdd = () => {
-    const name = addName.trim()
-    if (!name) {
+    if (!addDraft) return
+    if (!addDraft.name.trim()) {
       setAddError('Informe um nome.')
       return
     }
     setAddError('')
-    const next = addLastDate ? advanceDate(addLastDate, addWindow) : null
     create.mutate({
-      name,
-      amount_cents: addAmount ?? 0,
-      category_id: addCategoryId || null,
-      frequency: addWindow,
-      interval: 1,
-      next_due_on: next,
-      is_active: true,
-      aliases: addAliases,
-      isolated_cases: [],
+      name: addDraft.name.trim(),
+      amount_cents: addDraft.amount_cents,
+      frequency: addDraft.frequency,
+      interval: addDraft.interval,
+      next_due_on: addDraft.next_due_on,
+      is_active: addDraft.is_active,
+      aliases: addDraft.aliases,
+      isolated_cases: addDraft.isolated_cases,
     })
   }
-
-  const previewRule: RecurringRule | null = useMemo(() => {
-    if (!addOpen) return null
-    const next = addLastDate ? advanceDate(addLastDate, addWindow) : null
-    return {
-      id: 'preview',
-      name: addName.trim() || 'Sem nome',
-      amount_cents: addAmount ?? 0,
-      currency: 'BRL',
-      category_id: addCategoryId || null,
-      category_name: addCategoryName,
-      frequency: addWindow,
-      interval: 1,
-      day_of_month: null,
-      next_due_on: next,
-      is_active: true,
-      source: 'manual',
-      created_at: '',
-      updated_at: '',
-      aliases: addAliases,
-      isolated_cases: [],
-      tags: [],
-      tags_conflict: false,
-      days_until: next ? daysUntil(next) : null,
-    }
-  }, [addOpen, addName, addAmount, addCategoryId, addCategoryName, addLastDate, addWindow, addAliases])
 
   const editRule = (r: RecurringRule) => {
     setDraft({ ...r })
@@ -518,7 +577,6 @@ export default function Recurring() {
       input: {
         name: draft.name.trim(),
         amount_cents: draft.amount_cents,
-        category_id: draft.category_id,
         frequency: draft.frequency,
         interval: draft.interval,
         next_due_on: draft.next_due_on,
@@ -535,7 +593,6 @@ export default function Recurring() {
       input: {
         name: r.name,
         amount_cents: r.amount_cents,
-        category_id: r.category_id,
         frequency: r.frequency,
         interval: r.interval,
         next_due_on: r.next_due_on,
@@ -558,83 +615,30 @@ export default function Recurring() {
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-bold">Recorrentes</h1>
         <button
-          onClick={() => (addOpen ? resetAdd() : setAddOpen(true))}
+          onClick={() => (addDraft ? resetAdd() : setAddDraft(emptyDraft()))}
           className="rounded bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900"
         >
-          {addOpen ? 'Cancelar' : 'Nova regra'}
+          {addDraft ? 'Cancelar' : 'Nova regra'}
         </button>
       </div>
 
-      {/* Add panel: name + window only (strict flow), with live card preview. */}
-      {addOpen && (
-        <div className="mb-4 rounded border border-zinc-800 bg-zinc-900 p-3">
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="min-w-52 flex-1">
-              <label className="mb-1 block text-xs text-zinc-500">Nome</label>
-              <MerchantAutocomplete
-                value={addName}
-                onChange={(v) => {
-                  setAddName(v)
-                  setAddError('')
-                }}
-                onPick={pickMerchant}
-                placeholder="Ex.: Netflix, IPVA, PAGAMENTO VIA PIX…"
-                inputClassName="field w-full"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-zinc-500">Janela</label>
-              <select
-                value={addWindow}
-                onChange={(e) => setAddWindow(e.target.value)}
-                className="field w-32"
-              >
-                {FREQ_OPTIONS.map(([v, l]) => (
-                  <option key={v} value={v}>
-                    {l}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {addBusy && <span className="pb-2 text-xs text-zinc-500">buscando perfil…</span>}
-          </div>
-          {addError && <p className="mt-2 text-sm text-red-400">{addError}</p>}
-          <p className="mt-2 text-[11px] text-zinc-600">
-            {addAliases.length > 0
-              ? 'Nome encontrado nos dados: valor, categoria e primeiro alias foram preenchidos automaticamente.'
-              : 'Nome desconhecido: salve a regra e complete valor/categoria depois (ou vincule itens manualmente).'}
-          </p>
-          <div className="mt-3">
-            {previewRule && (
-              <RuleCard
-                rule={previewRule}
-                categories={categories}
-                expanded={false}
-                onToggleExpand={() => {}}
-                onEdit={() => {}}
-                onDelete={() => {}}
-                onToggleActive={() => {}}
-                preview
-              />
-            )}
-          </div>
-          <div className="mt-3 flex gap-2">
-            <button
-              onClick={saveAdd}
-              disabled={create.isPending || addBusy}
-              className="rounded bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 disabled:opacity-50"
-            >
-              Salvar regra
-            </button>
-            <button onClick={resetAdd} className="text-sm text-zinc-500 hover:text-zinc-200">
-              cancelar
-            </button>
-          </div>
+      {/* Create panel: same full form as edit (incl. aliases editor). */}
+      {addDraft && (
+        <div className="mb-4">
+          <RuleForm
+            draft={addDraft}
+            onChange={setAddDraft}
+            busy={create.isPending}
+            error={addError}
+            saveLabel="Salvar regra"
+            onSave={saveAdd}
+            onCancel={resetAdd}
+          />
         </div>
       )}
 
       {/* Rules list */}
-      {rules.length === 0 && !addOpen ? (
+      {rules.length === 0 && !addDraft ? (
         <p className="text-sm text-zinc-500">
           Nenhuma regra. Crie uma para acompanhar gastos recorrentes.
         </p>
@@ -642,105 +646,16 @@ export default function Recurring() {
         <div className="space-y-2">
           {rules.map((r) =>
             draft && draft.id === r.id ? (
-              <div key={r.id} className="rounded border border-zinc-700 bg-zinc-900 p-3">
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-500">Nome</label>
-                    <input
-                      value={draft.name}
-                      onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                      className="field w-full"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-500">Valor (R$)</label>
-                    <input
-                      value={Math.abs(draft.amount_cents) / 100}
-                      onChange={(e) => {
-                        const v = parseFloat(e.target.value.replace(',', '.'))
-                        const cents = Number.isNaN(v) ? 0 : Math.round(v * 100)
-                        setDraft({ ...draft, amount_cents: -cents })
-                      }}
-                      inputMode="decimal"
-                      className="field w-full"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-500">Categoria</label>
-                    <select
-                      value={draft.category_id ?? ''}
-                      onChange={(e) =>
-                        setDraft({ ...draft, category_id: e.target.value || null })
-                      }
-                      className="field w-full"
-                    >
-                      <option value="">Sem categoria</option>
-                      {categories.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-500">Janela</label>
-                    <select
-                      value={draft.frequency}
-                      onChange={(e) => setDraft({ ...draft, frequency: e.target.value })}
-                      className="field w-full"
-                    >
-                      {FREQ_OPTIONS.map(([v, l]) => (
-                        <option key={v} value={v}>
-                          {l}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-500">Próxima data</label>
-                    <input
-                      type="date"
-                      value={draft.next_due_on ?? ''}
-                      onChange={(e) =>
-                        setDraft({ ...draft, next_due_on: e.target.value || null })
-                      }
-                      className="field w-full"
-                    />
-                  </div>
-                  <label className="flex items-end gap-1.5 pb-1 text-sm text-zinc-400">
-                    <input
-                      type="checkbox"
-                      checked={draft.is_active}
-                      onChange={(e) => setDraft({ ...draft, is_active: e.target.checked })}
-                    />
-                    ativa
-                  </label>
-                </div>
-                <div className="mt-2">
-                  <label className="mb-1 block text-xs text-zinc-500">Nomes (aliases / casos isolados)</label>
-                  <NameEntryEditor
-                    aliases={draft.aliases}
-                    isolated={draft.isolated_cases}
-                    onChange={(a, i) => setDraft({ ...draft, aliases: a, isolated_cases: i })}
-                  />
-                </div>
-                {editError && <p className="mt-2 text-sm text-red-400">{editError}</p>}
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={saveEdit}
-                    disabled={update.isPending}
-                    className="rounded bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 disabled:opacity-50"
-                  >
-                    Salvar
-                  </button>
-                  <button
-                    onClick={() => setDraft(null)}
-                    className="text-sm text-zinc-500 hover:text-zinc-200"
-                  >
-                    cancelar
-                  </button>
-                </div>
-              </div>
+              <RuleForm
+                key={r.id}
+                draft={draft}
+                onChange={(d) => setDraft({ ...draft, ...d })}
+                busy={update.isPending}
+                error={editError}
+                saveLabel="Salvar"
+                onSave={saveEdit}
+                onCancel={() => setDraft(null)}
+              />
             ) : (
               <div key={r.id}>
                 <RuleCard

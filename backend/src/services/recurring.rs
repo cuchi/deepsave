@@ -10,14 +10,40 @@ pub fn normalize_name(s: &str) -> String {
     tags::strip_accents(s.trim()).to_lowercase()
 }
 
+/// Does an item's text identify as this alias?
+///
+/// Exact normalized equality wins. Otherwise, tolerate a trailing money value
+/// embedded in the name: the normalized alias must be a prefix at a token
+/// boundary and the remainder must look like an amount (digits with optional
+/// separators, possibly prefixed by "r$"). This captures varying payments under
+/// one alias — e.g. "PREST HAB 1847,32" / "PREST HAB 1832,10" → alias "prest hab".
+pub fn matches_alias(text: &str, alias: &str) -> bool {
+    let n = normalize_name(text);
+    let a = normalize_name(alias);
+    if n == a {
+        return true;
+    }
+    let Some(rest) = n.strip_prefix(&a) else {
+        return false;
+    };
+    let rest = rest.trim_start_matches(|c: char| matches!(c, ' ' | '-' | '/' | ':' | '.'));
+    let rest = rest.strip_prefix("r$").map(str::trim_start).unwrap_or(rest);
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | ' '))
+}
+
 /// Map a median day-gap between occurrences to a (frequency, interval) window.
 /// Kept when the detection feature was removed — the add-flow window suggestion reuses it.
+/// Windows are deliberately a bit loose: real bills land 28–35 days apart (day-of-week
+/// jitter, weekends, holidays), not exactly 30.
 pub fn classify_gap(median_gap: i64) -> Option<(String, i32)> {
     if (6..=8).contains(&median_gap) {
         Some(("weekly".to_string(), 1))
-    } else if (27..=31).contains(&median_gap) {
+    } else if (25..=35).contains(&median_gap) {
         Some(("monthly".to_string(), 1))
-    } else if (56..=62).contains(&median_gap) {
+    } else if (55..=70).contains(&median_gap) {
         Some(("monthly".to_string(), 2))
     } else if (340..=380).contains(&median_gap) {
         Some(("yearly".to_string(), 1))
@@ -61,9 +87,10 @@ pub async fn validate_entries(
 ) -> Result<Vec<String>> {
     let mut errors = Vec::new();
 
-    // Names that exist in the data, normalized (merchant or description). Items
-    // store raw names, so the comparison happens in Rust — same as matching.
-    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Names that exist in the data (merchant or description). Items store raw
+    // names, so the comparison happens in Rust — same as matching. `matches_alias`
+    // tolerates a trailing amount, so one alias can cover a varying payment
+    // (e.g. "PREST HAB 1847,32" / "PREST HAB 1832,10" → "prest hab").
     let merchants: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT merchant FROM items WHERE merchant IS NOT NULL AND merchant <> ''",
     )
@@ -71,9 +98,6 @@ pub async fn validate_entries(
     .await?;
     let descriptions: Vec<String> =
         sqlx::query_scalar("SELECT DISTINCT description FROM items").fetch_all(pool).await?;
-    for raw in merchants.iter().chain(descriptions.iter()) {
-        existing.insert(normalize_name(raw));
-    }
 
     for name in aliases.iter().chain(isolated_cases.iter()) {
         let n = normalize_name(name);
@@ -81,7 +105,11 @@ pub async fn validate_entries(
             errors.push(format!("'{name}' é inválido"));
             continue;
         }
-        if !existing.contains(&n) {
+        let exists = merchants
+            .iter()
+            .chain(descriptions.iter())
+            .any(|raw| matches_alias(raw, &n));
+        if !exists {
             errors.push(format!("'{name}' não existe nos dados"));
         }
     }
@@ -143,15 +171,16 @@ pub async fn link_item(pool: &PgPool, item_id: Uuid) -> Result<()> {
         .as_deref()
         .filter(|m| !m.trim().is_empty())
         .unwrap_or(&description);
-    let n = normalize_name(text);
 
-    let rule: Option<(Uuid,)> =
-        sqlx::query_as("SELECT rule_id FROM recurring_aliases WHERE name = $1 AND is_alias")
-            .bind(&n)
-            .fetch_optional(pool)
-            .await?;
-    if let Some((rule_id,)) = rule {
-        if current_rule != Some(rule_id) {
+    // Most specific (longest) alias wins when several could match — e.g. an item
+    // "LOJA 10" fits both aliases "loja" (prefix + amount) and "loja 10" (exact).
+    let aliases: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT name, rule_id FROM recurring_aliases WHERE is_alias ORDER BY length(name) DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    if let Some((_, rule_id)) = aliases.iter().find(|(a, _)| matches_alias(text, a)) {
+        if current_rule != Some(*rule_id) {
             sqlx::query("UPDATE items SET recurring_id = $1, updated_at = now() WHERE id = $2")
                 .bind(rule_id)
                 .bind(item_id)
@@ -199,11 +228,8 @@ pub async fn relink_rule(pool: &PgPool, rule_id: Uuid) -> Result<()> {
     .fetch_all(pool)
     .await?;
 
-    let alias_set: std::collections::HashSet<String> =
-        aliases.iter().map(|a| normalize_name(a)).collect();
-    let isolated_set: std::collections::HashSet<String> =
-        isolated.iter().map(|a| normalize_name(a)).collect();
-
+    // Matching tolerates a trailing amount in the item name (see `matches_alias`),
+    // so a varying payment maps to one alias.
     for (id, merchant, description, linked, current) in &rows {
         if *linked {
             continue;
@@ -212,8 +238,9 @@ pub async fn relink_rule(pool: &PgPool, rule_id: Uuid) -> Result<()> {
             .as_deref()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or(description);
-        let n = normalize_name(text);
-        if alias_set.contains(&n) && (current.is_none() || *current == Some(rule_id)) {
+        if aliases.iter().any(|a| matches_alias(text, a))
+            && (current.is_none() || *current == Some(rule_id))
+        {
             sqlx::query("UPDATE items SET recurring_id = $1, updated_at = now() WHERE id = $2")
                 .bind(rule_id)
                 .bind(id)
@@ -229,8 +256,7 @@ pub async fn relink_rule(pool: &PgPool, rule_id: Uuid) -> Result<()> {
             .as_deref()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or(description);
-        let n = normalize_name(text);
-        if isolated_set.contains(&n) {
+        if isolated.iter().any(|a| matches_alias(text, a)) {
             sqlx::query(
                 "UPDATE items SET recurring_id = $1, linked_manually = true, updated_at = now()
                  WHERE id = $2",

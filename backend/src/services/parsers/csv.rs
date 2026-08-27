@@ -77,6 +77,7 @@ fn parse_nubank_card(content: &str, delimiter: u8) -> Result<Vec<ParsedItem>> {
                 installment: None,
                 installment_count: None,
                 tags: vec![],
+                purchase_date: None,
             });
         } else {
             out.push(ParsedItem {
@@ -89,6 +90,7 @@ fn parse_nubank_card(content: &str, delimiter: u8) -> Result<Vec<ParsedItem>> {
                 installment: None,
                 installment_count: None,
                 tags: vec![],
+                purchase_date: None,
             });
         }
     }
@@ -144,6 +146,7 @@ fn parse_nubank_account(content: &str, delimiter: u8) -> Result<Vec<ParsedItem>>
             installment: None,
             installment_count: None,
             tags: vec![],
+            purchase_date: None,
         });
     }
     Ok(out)
@@ -223,6 +226,7 @@ fn parse_c6_invoice(
 
         out.push(ParsedItem {
             occurred_on,
+            purchase_date: Some(purchase_date),
             description: description.clone(),
             merchant: Some(description),
             amount_cents,
@@ -316,6 +320,7 @@ fn parse_c6_bank(content: &str) -> Result<Vec<ParsedItem>> {
             installment: None,
             installment_count: None,
             tags: vec![],
+            purchase_date: None,
         });
     }
     Ok(out)

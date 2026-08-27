@@ -104,6 +104,14 @@ pub async fn run() -> anyhow::Result<()> {
     tokio::spawn(services::sources::backfill_null_sources(pool.clone()));
     {
         let pool = pool.clone();
+        let storage_dir = storage_dir.clone();
+        tokio::spawn(async move {
+            // Idempotent: re-parses only documents with unassigned installment items.
+            let _ = services::series::backfill(&pool, &storage_dir).await;
+        });
+    }
+    {
+        let pool = pool.clone();
         tokio::spawn(async move {
             let _ = services::ingest::reclassify_pix_as_internal(&pool).await;
         });
@@ -180,6 +188,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/recurring/{id}/occurrences", get(routes::recurring::occurrences))
         .route("/recurring/merchants", get(routes::recurring::merchants))
         .route("/recurring/merchant-profile", get(routes::recurring::merchant_profile))
+        .route("/recurring/monthly-cost", get(routes::recurring::monthly_cost))
         .route(
             "/documents",
             get(routes::documents::list)
@@ -200,6 +209,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/dashboard/trend", get(routes::dashboard::trend))
         .route("/dashboard/daily", get(routes::dashboard::daily))
         .route("/dashboard/tags", get(routes::dashboard::tags))
+        .route("/dashboard/expected", get(routes::dashboard::expected))
         .route("/sources", get(routes::sources::list))
         .route("/sources/{id}", patch(routes::sources::update))
         .route("/coverage", get(routes::sources::coverage))
