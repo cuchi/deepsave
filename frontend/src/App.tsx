@@ -9,6 +9,7 @@ import Upload from './pages/Upload'
 import Review from './pages/Review'
 import Memory from './pages/Memory'
 import Recurring from './pages/Recurring'
+import Pluggy from './pages/Pluggy'
 import System from './pages/System'
 import Layout from './components/Layout'
 
@@ -45,6 +46,7 @@ export default function App() {
         <Route path="/coverage" element={<Navigate to="/upload" replace />} />
         <Route path="/memory" element={<Memory />} />
         <Route path="/recurring" element={<Recurring />} />
+        <Route path="/pluggy" element={<Pluggy />} />
         <Route path="/system" element={<System />} />
         <Route path="/tags" element={<Navigate to="/memory" replace />} />
       </Route>

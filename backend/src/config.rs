@@ -27,6 +27,11 @@ pub struct Config {
     pub deepseek_input_price_per_m: f64,
     pub deepseek_cache_hit_price_per_m: f64,
     pub deepseek_output_price_per_m: f64,
+
+    // Pluggy
+    pub pluggy_client_id: Option<String>,
+    pub pluggy_client_secret: Option<String>,
+    pub pluggy_api_key: Option<String>,
 }
 
 impl Config {
@@ -86,6 +91,16 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(12);
 
+        let pluggy_client_id = std::env::var("PLUGGY_CLIENT_ID")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let pluggy_client_secret = std::env::var("PLUGGY_CLIENT_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let pluggy_api_key = std::env::var("PLUGGY_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+
         Ok(Self {
             database_url,
             port,
@@ -104,6 +119,9 @@ impl Config {
             deepseek_cache_hit_price_per_m,
             deepseek_output_price_per_m,
             coverage_months,
+            pluggy_client_id,
+            pluggy_client_secret,
+            pluggy_api_key,
         })
     }
 }

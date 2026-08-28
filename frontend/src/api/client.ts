@@ -9,6 +9,10 @@ import type {
   ItemSummary,
   MatchDetail,
   MerchantProfile,
+  PluggyConnector,
+  PluggyItem,
+  PluggyStatus,
+  PluggySyncResult,
   RecurringOccurrence,
   RecurringRule,
   Source,
@@ -494,5 +498,41 @@ export interface SystemInfo {
 export const systemApi = {
   async get(): Promise<SystemInfo> {
     return (await api.get<SystemInfo>('/system')).data
+  },
+}
+
+export interface PluggyCreateInput {
+  connector_id: number
+  parameters?: Record<string, string>
+  client_user_id?: string
+}
+
+export const pluggyApi = {
+  async status(): Promise<PluggyStatus> {
+    return (await api.get<PluggyStatus>('/pluggy/status')).data
+  },
+  async connectors(): Promise<PluggyConnector[]> {
+    return (await api.get<PluggyConnector[]>('/pluggy/connectors')).data
+  },
+  async list(): Promise<PluggyItem[]> {
+    return (await api.get<PluggyItem[]>('/pluggy/items')).data
+  },
+  async create(input: PluggyCreateInput): Promise<PluggyItem> {
+    return (await api.post<PluggyItem>('/pluggy/items', input)).data
+  },
+  async refresh(id: string): Promise<PluggyItem> {
+    return (await api.post<PluggyItem>(`/pluggy/items/${id}/refresh`)).data
+  },
+  async sync(id: string): Promise<PluggySyncResult> {
+    return (await api.post<PluggySyncResult>(`/pluggy/items/${id}/sync`)).data
+  },
+  async import(id: string): Promise<PluggySyncResult> {
+    return (await api.post<PluggySyncResult>(`/pluggy/items/${id}/import`)).data
+  },
+  async syncAll(): Promise<{ done: number; imported: number }> {
+    return (await api.post<{ done: number; imported: number }>('/pluggy/sync-all')).data
+  },
+  async remove(id: string): Promise<{ ok: boolean }> {
+    return (await api.delete(`/pluggy/items/${id}`)).data
   },
 }
