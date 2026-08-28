@@ -213,7 +213,7 @@ export default function Lista() {
   const renderSubItem = (c: Item) => (
     <div
       key={c.id}
-      className="flex items-center gap-2 border-t border-zinc-800/60 py-1 first:border-t-0"
+      className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-zinc-800/60 py-1 first:border-t-0"
     >
       <span className="min-w-0 flex-1 truncate text-xs text-zinc-300">{c.description}</span>
       {c.tags.length > 0 && (
@@ -252,7 +252,7 @@ export default function Lista() {
 
     return (
       <div key={it.id}>
-        <div className="group relative flex items-center gap-2 py-1.5">
+        <div className="group relative flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
           <input
             type="checkbox"
             checked={selected.has(it.id)}
@@ -271,7 +271,8 @@ export default function Lista() {
           />
           <button
             onClick={() => setDetailsFor(detailsOpen ? null : it.id)}
-            className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200"
+            aria-label={detailsOpen ? 'Recolher detalhes' : 'Expandir detalhes'}
+            className="shrink-0 px-1 py-1 text-xs text-zinc-500 hover:text-zinc-200"
           >
             {detailsOpen ? '▾' : '▸'}
           </button>
@@ -279,9 +280,13 @@ export default function Lista() {
           <span className="w-10 shrink-0 text-xs tabular-nums text-zinc-500">
             {shortDate(it.occurred_on)}
           </span>
-          <span className="min-w-0 flex-1 truncate text-sm" title={it.description}>
+          <button
+            onClick={() => setDetailsFor(detailsOpen ? null : it.id)}
+            className="min-w-0 flex-1 truncate text-left text-sm hover:text-zinc-200"
+            title={`${it.description} — tocar para ver detalhes`}
+          >
             {itemTitle(it)}
-          </span>
+          </button>
           {it.installment_count != null && (
             <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
               {it.installment ?? '?'}/{it.installment_count}
@@ -344,7 +349,8 @@ export default function Lista() {
           )}
           <button
             onClick={() => setMenuFor(open ? null : it.id)}
-            className="shrink-0 px-1 text-zinc-500 hover:text-zinc-200"
+            aria-label="Ações do item"
+            className="shrink-0 px-2 py-1 text-zinc-500 hover:text-zinc-200"
           >
             ⋯
           </button>
@@ -504,7 +510,7 @@ export default function Lista() {
       />
 
       {selected.size > 0 && (
-        <div className="fixed bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-full border border-zinc-700 bg-zinc-900/95 py-2 pl-5 pr-2 text-sm shadow-2xl shadow-black/50 backdrop-blur">
+        <div className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-10 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-2xl border border-zinc-700 bg-zinc-900/95 px-4 py-2 text-sm shadow-2xl shadow-black/50 backdrop-blur sm:rounded-full sm:px-5 sm:pr-2">
           <span className="font-medium text-zinc-100">
             {selected.size} selecionado{selected.size > 1 ? 's' : ''}
           </span>

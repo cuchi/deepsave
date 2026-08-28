@@ -527,7 +527,7 @@ export default function Charts() {
         </button>
         {graphsOpen && (
           <div className="space-y-4 border-t border-zinc-800 p-4">
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
                 <p className="text-xs text-zinc-500">Despesas</p>
                 <p className="text-lg font-semibold tabular-nums">{fmtCents(dash?.total_spend_cents ?? 0)}</p>

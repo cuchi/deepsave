@@ -83,6 +83,8 @@ export interface CoverageSource {
   kind: string
   enabled: boolean
   present: string[]
+  /** Months only partially covered by bank statements (period doesn't span the full month). */
+  partial: string[]
   last_seen: string | null
 }
 

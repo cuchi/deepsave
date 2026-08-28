@@ -70,7 +70,21 @@ pub async fn coverage(
 
     let mut out = Vec::with_capacity(sources.len());
     for s in &sources {
-        let present: Vec<String> = sqlx::query_scalar(
+        // Bank statements know their covered period → we can flag partial months.
+        // Card faturas are always complete (user-confirmed for all banks).
+        let periods: Vec<(chrono::NaiveDate, chrono::NaiveDate)> = if s.kind == "bank_statement" {
+            sqlx::query_as(
+                "SELECT statement_start, statement_end FROM documents
+                 WHERE source_id = $1 AND statement_start IS NOT NULL AND statement_end IS NOT NULL",
+            )
+            .bind(s.id)
+            .fetch_all(&state.pool)
+            .await?
+        } else {
+            Vec::new()
+        };
+
+        let items_present: Vec<String> = sqlx::query_scalar(
             "SELECT DISTINCT to_char(i.occurred_on, 'YYYY-MM')
              FROM items i
              JOIN documents d ON d.id = i.document_id
@@ -81,6 +95,35 @@ pub async fn coverage(
         .bind(start)
         .fetch_all(&state.pool)
         .await?;
+
+        let mut present: Vec<String> = Vec::new();
+        let mut partial: Vec<String> = Vec::new();
+        if periods.is_empty() {
+            present = items_present; // no period info → legacy item-based presence
+        } else {
+            for m in &months {
+                let (y, mo) = m.split_once('-').unwrap();
+                let year: i32 = y.parse().unwrap();
+                let month: u32 = mo.parse().unwrap();
+                let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+                let last = if month == 12 {
+                    NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap() - chrono::Duration::days(1)
+                } else {
+                    NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap() - chrono::Duration::days(1)
+                };
+                let full = periods
+                    .iter()
+                    .any(|(s, e)| *s <= first && *e >= last);
+                if full {
+                    present.push(m.clone());
+                } else if periods
+                    .iter()
+                    .any(|(s, e)| *s <= last && *e >= first)
+                {
+                    partial.push(m.clone());
+                }
+            }
+        }
 
         let last_seen: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
             "SELECT max(d.uploaded_at) FROM documents d WHERE d.source_id = $1",
@@ -96,6 +139,7 @@ pub async fn coverage(
             "kind": s.kind,
             "enabled": s.enabled,
             "present": present,
+            "partial": partial,
             "last_seen": last_seen,
         }));
     }

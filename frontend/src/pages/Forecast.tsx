@@ -219,7 +219,7 @@ export default function Forecast() {
                   {items.map((u, i) => (
                     <div
                       key={`${u.date}-${u.kind}-${i}`}
-                      className="flex items-center gap-3 border-t border-zinc-800/60 py-1.5 text-sm first:border-t-0"
+                      className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-zinc-800/60 py-1.5 text-sm first:border-t-0"
                     >
                       <span className="w-10 shrink-0 text-xs tabular-nums text-zinc-500">
                         {dayShort(u.date)}

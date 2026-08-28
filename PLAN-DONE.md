@@ -195,3 +195,15 @@ new **Previsão** page (`/forecast`), which gained real forecast content:
 - "Estimativa" note (equal parcels, C6-only detection, active rules).
 Backend: shared `future_events` refactor (expected/forecast/upcoming all derive from
 it); 2 new integration tests.
+
+### M20 — Coverage: partial-month signalling for bank statements
+Card faturas are always complete (user-confirmed); bank statements are verified by
+their **covered period** — Nubank encodes it in the filename
+(`NU_..._01AGO2026_22AGO2026.csv`), C6/Caixa in the header
+(`Extrato de 24/08/2025 a 24/08/2026`). New `documents.statement_start/end`
+(populated at ingest + a startup backfill), and the coverage endpoint now returns
+`partial` months per source: a month is **partial** when a statement overlaps it
+without covering it fully (◐ in the table), **present** when fully covered
+(●), else absent. Faturas never partial. Strict DD/MM/YYYY round-trip parsing
+(chrono %d/%Y are lenient — space padding, 3-digit years). Live: Nubank and C6
+both flag Aug 2026 as partial.

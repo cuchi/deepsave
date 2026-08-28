@@ -98,8 +98,8 @@ function SuggestionRow({
 
   return (
     <div className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2">
-      <div className="flex items-center gap-3">
-        <div className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="min-w-0 w-full sm:w-auto sm:flex-1">
           <p className="truncate text-sm font-medium">{s.description}</p>
           <p className="truncate text-xs text-zinc-500">
             {s.occurred_on}
@@ -289,9 +289,9 @@ export default function Review() {
                   return (
                   <div
                     key={it.id}
-                    className="flex items-center gap-3 rounded border border-zinc-800 bg-zinc-950 px-3 py-2"
+                    className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded border border-zinc-800 bg-zinc-950 px-3 py-2"
                   >
-                    <div className="min-w-0">
+                    <div className="min-w-0 w-full sm:w-auto sm:flex-1">
                       <p className="truncate text-sm font-medium">{it.description}</p>
                       <p className="truncate text-xs text-zinc-500">
                         {it.occurred_on} · {KIND_LABELS[it.kind] ?? it.kind}
@@ -347,19 +347,19 @@ export default function Review() {
                     )}
                     <button
                       onClick={() => setEditing(it)}
-                      className="text-xs text-zinc-500 hover:text-zinc-200"
+                      className="rounded px-2 py-1.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
                     >
                       editar
                     </button>
                     <button
                       onClick={() => rejectItem.mutate(it.id)}
-                      className="text-xs text-zinc-500 hover:text-red-400"
+                      className="rounded px-2 py-1.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-red-400"
                     >
                       rejeitar
                     </button>
                     <button
                       onClick={() => confirmItem.mutate(it.id)}
-                      className="rounded bg-zinc-100 px-2 py-1 text-xs font-medium text-zinc-900"
+                      className="rounded bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900"
                     >
                       confirmar
                     </button>
@@ -506,10 +506,10 @@ export default function Review() {
                     key={m.id}
                     className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm"
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{m.child.description}</span>
-                      <span className="text-zinc-500">→</span>
-                      <span className="font-medium">{m.parent.description}</span>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="min-w-0 truncate font-medium">{m.child.description}</span>
+                      <span className="shrink-0 text-zinc-500">→</span>
+                      <span className="min-w-0 truncate font-medium">{m.parent.description}</span>
                       <span className="ml-auto text-xs text-zinc-500">
                         {(m.confidence * 100).toFixed(0)}%
                       </span>

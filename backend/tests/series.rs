@@ -151,8 +151,9 @@ async fn cadence_gap_creates_new_series(pool: PgPool) {
     let d1 = insert_doc(&pool).await;
     let d2 = insert_doc(&pool).await;
     let _a = insert_item(&pool, d1, "2026-07-01", "LOJA", -100, 1, 3).await;
-    // Parcel 3/3 with a one-month gap (should have been 2/3 in August).
-    let _b = insert_item(&pool, d2, "2026-09-01", "LOJA", -100, 3, 3).await;
+    // Parcel 3/3 dated October — the absolute position expects September, so
+    // this is a genuine mismatch (not just a missing fatura) → new series.
+    let _b = insert_item(&pool, d2, "2026-10-01", "LOJA", -100, 3, 3).await;
 
     series::assign_document(
         &pool,
@@ -164,7 +165,7 @@ async fn cadence_gap_creates_new_series(pool: PgPool) {
     series::assign_document(
         &pool,
         &doc(d2, Some(src)),
-        &[item(NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(), Some(NaiveDate::from_ymd_opt(2026, 6, 10).unwrap()), "LOJA", -100, 3, 3)],
+        &[item(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(), Some(NaiveDate::from_ymd_opt(2026, 6, 10).unwrap()), "LOJA", -100, 3, 3)],
     )
     .await
     .unwrap();
@@ -396,4 +397,115 @@ async fn forecast_buckets_by_month_and_upcoming_feed(pool: PgPool) {
     assert_eq!(rec.amount_cents, 500);
     assert_eq!(rec.description, "aluguel");
     assert!(rec.progress.is_none());
+}
+
+#[sqlx::test]
+async fn out_of_order_faturas_still_link_to_one_series(pool: PgPool) {
+    common::migrate(&pool).await;
+    let src = insert_source(&pool).await;
+    // Documents processed 3/6 before 2/6 (uploads out of order).
+    let d1 = insert_doc(&pool).await; // parcel 1
+    let d2 = insert_doc(&pool).await; // parcel 3 (arrives before parcel 2)
+    let d3 = insert_doc(&pool).await; // parcel 2
+    insert_item(&pool, d1, "2026-03-01", "VIAGEM", -200, 1, 6).await;
+    insert_item(&pool, d2, "2026-05-01", "VIAGEM", -200, 3, 6).await;
+    insert_item(&pool, d3, "2026-04-01", "VIAGEM", -200, 2, 6).await;
+
+    for (d, day, parcel) in [
+        (d1, "2026-03-01", 1),
+        (d2, "2026-05-01", 3),
+        (d3, "2026-04-01", 2),
+    ] {
+        series::assign_document(
+            &pool,
+            &doc(d, Some(src)),
+            &[item(
+                NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap(),
+                Some(NaiveDate::from_ymd_opt(2026, 2, 10).unwrap()),
+                "VIAGEM",
+                -200,
+                parcel,
+                6,
+            )],
+        )
+        .await
+        .unwrap();
+    }
+
+    // Absolute-position matching: all three parcels belong to ONE series.
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM purchase_series")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let distinct: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT series_id) FROM items WHERE description = 'VIAGEM'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(distinct, 1);
+}
+
+#[sqlx::test]
+async fn varying_purchase_date_does_not_split_series(pool: PgPool) {
+    common::migrate(&pool).await;
+    let src = insert_source(&pool).await;
+    let d1 = insert_doc(&pool).await;
+    let d2 = insert_doc(&pool).await;
+    // Annual fee: each fatura reports a different "Data de Compra".
+    insert_item(&pool, d1, "2026-01-01", "ANUIDADE", -50, 4, 12).await;
+    insert_item(&pool, d2, "2026-02-01", "ANUIDADE", -50, 5, 12).await;
+
+    series::assign_document(
+        &pool,
+        &doc(d1, Some(src)),
+        &[item(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(), Some(NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()), "ANUIDADE", -50, 4, 12)],
+    )
+    .await
+    .unwrap();
+    series::assign_document(
+        &pool,
+        &doc(d2, Some(src)),
+        &[item(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(), Some(NaiveDate::from_ymd_opt(2026, 2, 3).unwrap()), "ANUIDADE", -50, 5, 12)],
+    )
+    .await
+    .unwrap();
+
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM purchase_series")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[sqlx::test]
+async fn series_starting_in_december_links_across_year_boundary(pool: PgPool) {
+    common::migrate(&pool).await;
+    let src = insert_source(&pool).await;
+    let d1 = insert_doc(&pool).await; // parcel 2 in Jan → start inferred as Dec (prior year)
+    let d2 = insert_doc(&pool).await; // parcel 3 in Feb
+    insert_item(&pool, d1, "2026-01-01", "LIVRARIA", -100, 2, 12).await;
+    insert_item(&pool, d2, "2026-02-01", "LIVRARIA", -100, 3, 12).await;
+
+    series::assign_document(
+        &pool,
+        &doc(d1, Some(src)),
+        &[item(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(), Some(NaiveDate::from_ymd_opt(2025, 12, 1).unwrap()), "LIVRARIA", -100, 2, 12)],
+    )
+    .await
+    .unwrap();
+    series::assign_document(
+        &pool,
+        &doc(d2, Some(src)),
+        &[item(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(), Some(NaiveDate::from_ymd_opt(2025, 12, 1).unwrap()), "LIVRARIA", -100, 3, 12)],
+    )
+    .await
+    .unwrap();
+
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM purchase_series")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
 }

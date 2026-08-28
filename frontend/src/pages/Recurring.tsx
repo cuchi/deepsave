@@ -307,22 +307,24 @@ function RuleCard({
         <span className="shrink-0 text-xs text-zinc-500">
           próx: {nextDueLabel(rule.next_due_on, rule.days_until)}
         </span>
-        <button
-          onClick={onToggleActive}
-          className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200"
-          title={rule.is_active ? 'Pausar regra' : 'Ativar regra'}
-        >
-          {rule.is_active ? 'pausar' : 'ativar'}
-        </button>
-        <button onClick={onEdit} className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200">
-          editar
-        </button>
-        <button
-          onClick={onDelete}
-          className="shrink-0 text-xs text-zinc-500 hover:text-red-400"
-        >
-          apagar
-        </button>
+        <span className="flex shrink-0 items-center gap-2">
+          <button
+            onClick={onToggleActive}
+            className="text-xs text-zinc-500 hover:text-zinc-200"
+            title={rule.is_active ? 'Pausar regra' : 'Ativar regra'}
+          >
+            {rule.is_active ? 'pausar' : 'ativar'}
+          </button>
+          <button onClick={onEdit} className="text-xs text-zinc-500 hover:text-zinc-200">
+            editar
+          </button>
+          <button
+            onClick={onDelete}
+            className="text-xs text-zinc-500 hover:text-red-400"
+          >
+            apagar
+          </button>
+        </span>
       </div>
       {(rule.aliases.length > 0 || rule.isolated_cases.length > 0) && (
         <div className="mt-1 flex flex-wrap items-center gap-1 pl-5 text-[11px] text-zinc-600">

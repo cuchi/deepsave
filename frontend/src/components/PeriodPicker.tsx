@@ -225,7 +225,7 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-full z-20 mt-1 w-[min(680px,calc(100vw-2rem))] rounded-lg border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
+          <div className="absolute left-0 top-full z-20 mt-1 w-[min(680px,calc(100vw-2rem))] max-h-[min(32rem,calc(100dvh-1rem))] overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
             <div className="grid gap-4 sm:grid-cols-[150px_1fr]">
               {/* Presets */}
               <div className="space-y-0.5">

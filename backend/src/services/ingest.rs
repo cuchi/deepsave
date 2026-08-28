@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::models::DocumentRow;
 use crate::services::ai::{self, AiClient, AiExtraction};
 use crate::services::parsers::{caixa_card, csv, ParsedItem};
-use crate::services::{extract, linking, recurring, series, tags};
+use crate::services::{extract, linking, recurring, series, sources, tags};
 
 /// Process a single document based on its file type.
 ///
@@ -50,6 +50,21 @@ async fn process_csv(pool: &PgPool, doc: &DocumentRow) -> Result<()> {
         .context("failed to read csv file")?;
     let billing_month = billing_month_from_filename(&doc.filename);
     let items = csv::parse_csv(&content, billing_month).context("failed to parse csv")?;
+
+    // Bank statements carry their covered period (Nubank: filename; C6/Caixa:
+    // header) — store it so coverage can flag partial months.
+    if doc.kind == "bank_statement" {
+        if let Some((start, end)) = sources::extract_statement_period(&doc.filename, &content) {
+            sqlx::query(
+                "UPDATE documents SET statement_start = $1, statement_end = $2 WHERE id = $3",
+            )
+            .bind(start)
+            .bind(end)
+            .bind(doc.id)
+            .execute(pool)
+            .await?;
+        }
+    }
 
     let source = statement_source(doc);
     let ids = insert_parsed_items(pool, doc, source, &items).await?;

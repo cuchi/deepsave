@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{Datelike, Months, NaiveDate};
+use chrono::{Datelike, NaiveDate};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -94,8 +94,13 @@ pub async fn assign_document(pool: &PgPool, doc: &DocumentRow, parsed: &[ParsedI
 }
 
 /// Find the series this parcel continues, or create a new one.
-/// Matching = same (source, description, count) + expected cadence (next parcel,
-/// next month) + compatible purchase date.
+///
+/// Matching is **order-independent**: the series' start month is inferred from
+/// its earliest parcel (`min occurred_on − (min installment − 1) months`), and
+/// an incoming parcel k fits if `start + (k−1)` months equals its month. This
+/// tolerates faturas being processed/uploaded out of order (parcel 3 before
+/// parcel 2). Also requires the parcel not to be present yet and a compatible
+/// purchase date. Same (source, description, count) key throughout.
 async fn match_or_create(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_id: Option<Uuid>,
@@ -105,9 +110,11 @@ async fn match_or_create(
     parcel: i32,
     occurred_on: NaiveDate,
 ) -> Result<Uuid> {
-    let candidates: Vec<(Uuid, Option<NaiveDate>, Option<i32>, Option<NaiveDate>)> =
+    let candidates: Vec<(Uuid, Option<NaiveDate>, i32, NaiveDate, Vec<i32>)> =
         sqlx::query_as(
-            "SELECT s.id, s.purchase_date, MAX(i.installment)::int, MAX(i.occurred_on)
+            "SELECT s.id, s.purchase_date,
+                    MIN(i.installment)::int, MIN(i.occurred_on),
+                    array_agg(i.installment) FILTER (WHERE i.installment IS NOT NULL)
              FROM purchase_series s
              LEFT JOIN items i ON i.series_id = s.id
              WHERE s.description = $1 AND s.installment_count = $2
@@ -122,33 +129,27 @@ async fn match_or_create(
 
     let item_ym = (occurred_on.year(), occurred_on.month());
     let mut matching: Vec<(Uuid, Option<NaiveDate>)> = Vec::new();
-    for (sid, s_purchase, max_inst, last_date) in candidates {
-        let expected_parcel = max_inst.map(|m| m + 1).unwrap_or(1);
-        let expected_ym = match last_date {
-            Some(d) => {
-                let first = NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap();
-                let next = first.checked_add_months(Months::new(1)).unwrap();
-                (next.year(), next.month())
-            }
-            None => item_ym,
-        };
-        if expected_parcel == parcel
-            && expected_ym == item_ym
-            && (s_purchase.is_none() || purchase_date.is_none() || s_purchase == purchase_date)
-        {
+    for (sid, s_purchase, min_inst, first_date, parcels) in candidates {
+        if parcels.is_empty() || parcels.contains(&parcel) {
+            continue;
+        }
+        // Absolute position: expected month for this parcel number.
+        let start = shift_ym(first_date.year(), first_date.month(), -(min_inst - 1));
+        let expected = shift_ym(start.0, start.1, parcel - 1);
+        if expected == item_ym {
             matching.push((sid, s_purchase));
         }
     }
 
     if matching.len() == 1 {
+        // Single unambiguous candidate — attach regardless of purchase date (some
+        // lines, e.g. annual fees, report a varying "Data de Compra").
         return Ok(matching[0].0);
     }
     if matching.len() > 1 {
-        // Prefer the candidate whose purchase date matches exactly.
-        if let Some((sid, Some(_))) = matching
-            .iter()
-            .find(|(_, pd)| *pd == purchase_date)
-        {
+        // Overlapping candidates (e.g. two identical purchases started the same
+        // month): the purchase date picks the right one.
+        if let Some((sid, Some(_))) = matching.iter().find(|(_, pd)| *pd == purchase_date) {
             return Ok(*sid);
         }
     }
@@ -165,6 +166,15 @@ async fn match_or_create(
     .fetch_one(&mut **tx)
     .await?;
     Ok(id)
+}
+
+/// Shift a (year, month) pair by `delta` months. Months are 1-based but the
+/// arithmetic uses 0-based indices so December never wraps to the next year.
+fn shift_ym(y: i32, m: u32, delta: i32) -> (i32, u32) {
+    let total = y * 12 + (m as i32 - 1) + delta;
+    let ny = total.div_euclid(12);
+    let nm = total.rem_euclid(12) + 1;
+    (ny, nm as u32)
 }
 
 /// One-time backfill for legacy data: re-parse every document that still has

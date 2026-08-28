@@ -55,7 +55,7 @@ function DocRow({
     <div className="rounded border border-zinc-800 bg-zinc-900">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm"
+        className="flex w-full flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2 text-left text-sm"
       >
         <BankLogo bank={bank} />
         <span className="font-medium">{KIND_LABELS[doc.kind as DocumentKind]}</span>
@@ -216,7 +216,7 @@ export default function Upload() {
       <p className="mb-4 text-sm text-zinc-500">
         Fontes fundamentais (bancos × conta/cartão) e os últimos {(coverage?.months ?? []).length}{' '}
         meses. <span className="text-emerald-400">●</span> presente ·{' '}
-        <span className="text-zinc-700">●</span> ausente.
+        <span className="text-amber-400">◐</span> parcial · <span className="text-zinc-700">●</span> ausente.
       </p>
 
       <div className="overflow-x-auto rounded border border-zinc-800">
@@ -238,6 +238,7 @@ export default function Upload() {
           <tbody>
             {(coverage?.sources ?? []).map((s) => {
               const present = new Set(s.present)
+              const partial = new Set(s.partial ?? [])
               return (
                 <tr key={s.id} className={s.enabled ? '' : 'opacity-40'}>
                   <td className="py-2 pl-4 pr-4">
@@ -251,9 +252,17 @@ export default function Upload() {
                   </td>
                   {(coverage?.months ?? []).map((m) => (
                     <td key={m} className="px-1 py-2 text-center">
-                      <span className={present.has(m) ? 'text-emerald-400' : 'text-zinc-700'}>
-                        ●
-                      </span>
+                      {present.has(m) ? (
+                        <span className="text-emerald-400" title="Mês completo">
+                          ●
+                        </span>
+                      ) : partial.has(m) ? (
+                        <span className="text-amber-400" title="Mês parcial — extrato não cobre o mês todo">
+                          ◐
+                        </span>
+                      ) : (
+                        <span className="text-zinc-700">●</span>
+                      )}
                     </td>
                   ))}
                   <td className="py-2 pl-4 pr-4 text-xs text-zinc-500">

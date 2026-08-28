@@ -79,7 +79,7 @@ export default function BulkEditModal({ ids, onClose, onApply }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-10 grid place-items-center bg-black/60 p-4"
+      className="fixed inset-0 z-30 grid place-items-center bg-black/60 p-4"
       onClick={onClose}
     >
       <form

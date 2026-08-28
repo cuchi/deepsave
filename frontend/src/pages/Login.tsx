@@ -26,10 +26,10 @@ export default function Login() {
   }
 
   return (
-    <div className="grid min-h-screen place-items-center bg-zinc-950 text-zinc-100">
+    <div className="grid min-h-screen place-items-center bg-zinc-950 p-4 text-zinc-100">
       <form
         onSubmit={submit}
-        className="w-80 space-y-4 rounded-lg border border-zinc-800 bg-zinc-900 p-6"
+        className="w-full max-w-sm space-y-4 rounded-lg border border-zinc-800 bg-zinc-900 p-6"
       >
         <h1 className="text-xl font-bold tracking-tight">DeepSave</h1>
         <p className="text-sm text-zinc-400">Entre com sua senha</p>

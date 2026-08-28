@@ -52,7 +52,7 @@ function MemoryRow({ entry, categories, onUpdate, onDelete, onApply }: RowProps)
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded border border-zinc-800 bg-zinc-900 px-3 py-2">
-      <span className="w-44 truncate text-sm font-medium" title={entry.merchant}>
+      <span className="w-full truncate text-sm font-medium sm:w-44" title={entry.merchant}>
         {entry.merchant}
       </span>
       <select
@@ -61,7 +61,7 @@ function MemoryRow({ entry, categories, onUpdate, onDelete, onApply }: RowProps)
           setCategoryId(e.target.value)
           commit(e.target.value, tags)
         }}
-        className="field w-40"
+        className="field w-full sm:w-40"
       >
         <option value="">Sem categoria</option>
         {categories.map((c) => (
