@@ -26,6 +26,30 @@ use tracing::info;
 
 use crate::routes::auth::LoginLimiter;
 use services::ai::AiClient;
+use services::pluggy::PluggyClient;
+
+/// Optional Pluggy client — present only when the env is configured.
+#[derive(Clone, Default)]
+pub struct PluggyHandle {
+    inner: Option<PluggyClient>,
+}
+
+impl PluggyHandle {
+    pub fn is_configured(&self) -> bool {
+        self.inner.as_ref().map_or(false, |c| c.is_configured())
+    }
+    pub fn client(&self) -> Option<&PluggyClient> {
+        self.inner.as_ref()
+    }
+    /// 'api_key' when PLUGGY_API_KEY is used, 'client' when the /auth flow is.
+    pub fn auth_mode(&self) -> &'static str {
+        match self.inner.as_ref() {
+            Some(c) if c.uses_fixed_key() => "api_key",
+            Some(_) => "client",
+            None => "none",
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,6 +62,7 @@ pub struct AppState {
     pub cookie_secure: bool,
     /// In-memory brute-force guard for the login endpoint.
     pub login_limiter: Arc<LoginLimiter>,
+    pub pluggy: PluggyHandle,
     password_hash: String,
 }
 
@@ -104,9 +129,29 @@ pub async fn run() -> anyhow::Result<()> {
         .context("failed to resolve storage dir")?;
 
     let ai = AiClient::new(&config, pool.clone());
+    // Prefer a fixed API key (single-user): no /auth round-trip, no expiry
+    // handling. Fall back to client credentials only when the key is absent.
+    let pluggy = if let Some(key) = &config.pluggy_api_key {
+        PluggyHandle {
+            inner: Some(PluggyClient::from_api_key(key.clone())),
+        }
+    } else if let (Some(id), Some(secret)) = (&config.pluggy_client_id, &config.pluggy_client_secret) {
+        PluggyHandle {
+            inner: Some(PluggyClient::new(id.clone(), secret.clone())),
+        }
+    } else {
+        tracing::warn!("PLUGGY_API_KEY (or PLUGGY_CLIENT_ID/PLUGGY_CLIENT_SECRET) not set — pluggy integration disabled");
+        PluggyHandle::default()
+    };
     tokio::spawn(services::queue::run_worker(pool.clone(), ai.clone()));
     tokio::spawn(services::ai_tags::run_worker(pool.clone(), ai.clone()));
     tokio::spawn(services::sources::backfill_null_sources(pool.clone()));
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let _ = services::sources::backfill_statement_periods(pool).await;
+        });
+    }
     {
         let pool = pool.clone();
         let storage_dir = storage_dir.clone();
@@ -137,6 +182,7 @@ pub async fn run() -> anyhow::Result<()> {
         coverage_months: config.coverage_months,
         cookie_secure: config.cookie_secure,
         login_limiter: Arc::new(LoginLimiter::default()),
+        pluggy,
     };
 
     let protected = Router::new()
@@ -223,6 +269,14 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/sources/{id}", patch(routes::sources::update))
         .route("/coverage", get(routes::sources::coverage))
         .route("/system", get(routes::system::system))
+        .route("/pluggy/status", get(routes::pluggy::status))
+        .route("/pluggy/connectors", get(routes::pluggy::connectors))
+        .route("/pluggy/items", get(routes::pluggy::list).post(routes::pluggy::create))
+        .route("/pluggy/items/{id}", axum::routing::delete(routes::pluggy::delete))
+        .route("/pluggy/items/{id}/refresh", post(routes::pluggy::refresh))
+        .route("/pluggy/items/{id}/sync", post(routes::pluggy::sync))
+        .route("/pluggy/items/{id}/import", post(routes::pluggy::import))
+        .route("/pluggy/sync-all", post(routes::pluggy::sync_all))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

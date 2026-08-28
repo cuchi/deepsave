@@ -40,6 +40,9 @@ pub fn test_config(base_url: String) -> Config {
         deepseek_cache_hit_price_per_m: 0.07,
         deepseek_output_price_per_m: 1.10,
         coverage_months: 12,
+        pluggy_client_id: None,
+        pluggy_client_secret: None,
+        pluggy_api_key: None,
     }
 }
 

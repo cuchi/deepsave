@@ -175,3 +175,70 @@ export interface SuggestionDetail {
   tags: string[]
   document_id: string | null
 }
+
+// ---------- Pluggy ----------
+
+export interface PluggyStatus {
+  configured: boolean
+  auth: 'api_key' | 'client' | 'none'
+  items: number
+  accounts: number
+}
+
+export interface PluggyConnector {
+  id: number
+  name: string
+  kind: string | null
+  oauth: boolean
+  mfa: boolean
+  open_finance: boolean
+  image_url: string | null
+  credentials: {
+    name: string
+    label: string | null
+    type: string | null
+    optional: boolean
+    placeholder: string | null
+  }[]
+}
+
+export interface PluggyAccount {
+  id: string
+  pluggy_account_id: string
+  account_id: string | null
+  name: string
+  account_type: string | null
+  subtype: string | null
+  currency: string
+  balance: number | null
+  credit_limit: number | null
+  due_date: string | null
+  close_date: string | null
+  last_sync_at: string | null
+}
+
+export interface PluggyItem {
+  id: string
+  pluggy_id: string
+  connector_id: number | null
+  connector_name: string | null
+  status: string
+  execution_status: string | null
+  error: unknown
+  status_detail: string | null
+  last_updated_at: string | null
+  last_sync_at: string | null
+  created_at: string
+  item_count: number
+  oauth_url: string | null
+  accounts: PluggyAccount[]
+}
+
+export interface PluggySyncResult {
+  status: string
+  execution_status?: string | null
+  imported: number
+  pending?: boolean
+  error?: unknown
+  status_detail?: string | null
+}
