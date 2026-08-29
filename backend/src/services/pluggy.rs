@@ -836,6 +836,70 @@ fn token_score(candidate: &str, tx_tokens: &std::collections::HashSet<String>) -
         .count()
 }
 
+/// Canonical series identity for a description (sorted token set) — stable
+/// across minor formatting differences ("DI FATTO" vs "DIFATTO").
+fn series_key(description: &str) -> String {
+    let mut toks: Vec<String> = desc_tokens(description).into_iter().collect();
+    toks.sort();
+    toks.join(" ")
+}
+
+/// Assign installment items (Pluggy: `installment_count > 1`, no `series_id`)
+/// to `purchase_series` rows keyed by (account, merchant tokens, count) so the
+/// forecast/expected/upcoming queries can project future parcels. The first
+/// parcel seen creates the series; later parcels of the same purchase join it.
+/// Idempotent — only touches unassigned items.
+pub async fn assign_installment_series(pool: &PgPool) -> Result<usize> {
+    // Index existing series by (account_id, token key, count).
+    let existing: Vec<(Uuid, Option<Uuid>, String, i32)> = sqlx::query_as(
+        "SELECT id, account_id, description, installment_count FROM purchase_series",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut by_key: std::collections::HashMap<(Option<Uuid>, String, i32), Uuid> =
+        std::collections::HashMap::new();
+    for (id, account_id, description, count) in existing {
+        by_key
+            .entry((account_id, series_key(&description), count))
+            .or_insert(id);
+    }
+
+    let items: Vec<(Uuid, Option<Uuid>, String, i32)> = sqlx::query_as(
+        "SELECT id, account_id, description, installment_count FROM items
+         WHERE installment_count > 1 AND series_id IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut assigned = 0usize;
+    for (item_id, account_id, description, count) in items {
+        let key = (account_id, series_key(&description), count);
+        let series_id = match by_key.get(&key) {
+            Some(id) => *id,
+            None => {
+                let (id,): (Uuid,) = sqlx::query_as(
+                    "INSERT INTO purchase_series (account_id, description, installment_count)
+                     VALUES ($1, $2, $3) RETURNING id",
+                )
+                .bind(account_id)
+                .bind(&description)
+                .bind(count)
+                .fetch_one(pool)
+                .await?;
+                by_key.insert(key, id);
+                id
+            }
+        };
+        sqlx::query("UPDATE items SET series_id = $1 WHERE id = $2")
+            .bind(series_id)
+            .bind(item_id)
+            .execute(pool)
+            .await?;
+        assigned += 1;
+    }
+    Ok(assigned)
+}
+
 /// Link each refund to the charge it reverses (`items.refunded_item_id`), so
 /// the graphs can net them. Kind-agnostic (the counterpart may be `expense` or
 /// `internal`). Two passes, greedy & unique:

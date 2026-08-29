@@ -82,6 +82,8 @@ pub async fn sync(
     // Pick up any .env changes without a restart.
     let seeded = pluggy::seed_configured_accounts(&state.pool, &state.pluggy_accounts).await?;
     let results = pluggy::sync_all_accounts(&state.pool, client, q.from, q.to).await?;
+    // Assign installment items to purchase series (feeds the forecast).
+    let series = pluggy::assign_installment_series(&state.pool).await?;
     // Link refunds to the charges they reverse (for graph netting).
     let linked_refunds = pluggy::link_refunds(&state.pool).await?;
 
@@ -90,6 +92,7 @@ pub async fn sync(
         "configured": seeded,
         "accounts": results,
         "new": total_new,
+        "series": series,
         "linked_refunds": linked_refunds,
     })))
 }

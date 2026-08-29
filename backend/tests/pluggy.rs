@@ -149,3 +149,50 @@ async fn accounts_are_seeded_and_linked(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(accounts_rows, 2);
 }
+
+#[sqlx::test]
+async fn assigns_installments_to_purchase_series(pool: sqlx::PgPool) {
+    common::migrate(&pool).await;
+    use deepsave_backend::services::pluggy::assign_installment_series;
+
+    // Two parcels of one 10x purchase + one parcel of another.
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, installment, installment_count)
+         VALUES ('pluggy', 'expense', 'confirmed', '2026-03-16', 'GMAD MADVILLE MADEIRAS JOINVILLE BRA', -20832, 1, 10)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, installment, installment_count)
+         VALUES ('pluggy', 'expense', 'confirmed', '2026-04-15', 'GMAD MADVILLE MADEIRAS JOINVILLE BRA', -20832, 2, 10)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, installment, installment_count)
+         VALUES ('pluggy', 'expense', 'confirmed', '2026-05-15', 'AIRBNB * HM8XS2HWQA SAO PAULO', -10937, 2, 6)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(assign_installment_series(&pool).await.unwrap(), 3);
+
+    // Both GMAD parcels share one series; AIRBNB gets its own.
+    let (series_count, gmads, airbnb): (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM purchase_series),
+                (SELECT count(DISTINCT series_id) FROM items WHERE description ILIKE '%GMAD%'),
+                (SELECT count(DISTINCT series_id) FROM items WHERE description ILIKE '%AIRBNB%')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(series_count, 2);
+    assert_eq!(gmads, 1);
+    assert_eq!(airbnb, 1);
+
+    // Idempotent: a re-run assigns nothing new.
+    assert_eq!(assign_installment_series(&pool).await.unwrap(), 0);
+}
