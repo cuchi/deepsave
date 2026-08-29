@@ -207,3 +207,45 @@ without covering it fully (◐ in the table), **present** when fully covered
 (●), else absent. Faturas never partial. Strict DD/MM/YYYY round-trip parsing
 (chrono %d/%Y are lenient — space padding, 3-digit years). Live: Nubank and C6
 both flag Aug 2026 as partial.
+
+### M21 — Recorrentes revamp (v0.9)
+
+Design doc moved from `PLAN-recurring.md` (now archived here). Rules became pure
+forecast/analytics constructs that **link to real items**:
+
+- **Data model** (migration 0010): `recurring_rules.description` → `name` (free-form
+  label, no matching role); `merchant` and stored `tags` dropped; new `recurring_aliases`
+  table (`rule_id`, `name`, `is_alias`, partial unique index on `is_alias` — aliases are
+  globally unique across rules); `items.linked_manually` marks user-made links so
+  automation never destroys them.
+- **Matching**: normalized exact equality (trim + lowercase + strip accents) against
+  **alias** entries only; target = `merchant`, falling back to `description` only when
+  merchant is null. At most one rule per item (alias uniqueness + single target).
+  Excludes installments, receipt children, non-confirmed items. Alias matching tolerates
+  a trailing amount in the item name (`matches_alias`) — one alias covers varying
+  payments like "PREST HAB 1847,32" / "PREST HAB 1832,10". **Manual links win** over
+  auto-match.
+- **Linking runs** on item confirm, on ingest (confirmed items), on rule create/update
+  (re-link), via manual `POST /items/{id}/link-recurring` (+ bulk `POST /items/link-recurring`).
+- **Name entries**: two types — alias (auto-match) and isolated case (one-shot manual
+  reference, may repeat across rules). Validation on save: name must exist in the data
+  (item merchant/description), aliases must be globally unique → 400 with pt-BR message.
+- **Derived rule tags**: `list` aggregates linked confirmed items' tags per rule (union)
+  + `tags_conflict` flag (amber ⚠ when items disagree). Tag rename/merge/delete cascade
+  to items only; no rule-side cascade (`TagRenameResult.recurring_updated` removed).
+- **Next date never in the past**: `advance_next_due` computed at read time
+  (`next_due_on` + `days_until`), clamped on write; old `GET /recurring/upcoming` folded
+  into `list`.
+- **New endpoints**: `GET /recurring/merchants?q=` (autocomplete), `GET /recurring/merchant-profile?name=`
+  (auto-derivation for the add flow, `classify_gap` window suggestion),
+  `GET /recurring/{id}/occurrences` (query by `items.recurring_id` — the link is the
+  source of truth, no name-match fallback), `POST /recurring/reconcile`.
+- **Suggestion feature removed** (was `suggest()` + `/recurring/suggestions` + Sugestões
+  UI) — detection heuristics kept in git history; `classify_gap()` retained for the
+  add-flow window suggestion.
+- **Frontend**: single rules list (RuleCard with derived tags, name-entry editor with
+  alias/isolated checkbox + validation, expandable "Ocorrências recentes"), add flow
+  with autocomplete + preview (strict: read-only except name/window for unknown names),
+  manual "Vincular a regra…" in the Lista ⋯ menu (item + bulk), recurring chip on linked
+  items in the list.
+- Tests: `backend/tests/recurring.rs` (validation, linking, relink, manual-link priority).

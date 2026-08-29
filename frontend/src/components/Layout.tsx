@@ -9,7 +9,6 @@ const NAV_LINKS = [
   { to: '/forecast', label: 'Previsão' },
   { to: '/memory', label: 'Memória' },
   { to: '/recurring', label: 'Recorrentes' },
-  { to: '/pluggy', label: 'Pluggy' },
   { to: '/system', label: 'Sistema' },
 ]
 

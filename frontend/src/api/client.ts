@@ -427,7 +427,6 @@ export interface SystemInfo {
   storage_file_count: number
   table_counts: TableCount[]
   items_by_status: StatusCount[]
-  documents_by_status: StatusCount[]
 }
 
 export const systemApi = {

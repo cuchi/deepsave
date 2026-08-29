@@ -7,7 +7,6 @@ import Forecast from './pages/Forecast'
 import Lista from './pages/Lista'
 import Memory from './pages/Memory'
 import Recurring from './pages/Recurring'
-import Pluggy from './pages/Pluggy'
 import System from './pages/System'
 import Layout from './components/Layout'
 
@@ -41,7 +40,7 @@ export default function App() {
         <Route path="/categories" element={<Navigate to="/memory" replace />} />
         <Route path="/memory" element={<Memory />} />
         <Route path="/recurring" element={<Recurring />} />
-        <Route path="/pluggy" element={<Pluggy />} />
+        <Route path="/pluggy" element={<Navigate to="/system" replace />} />
         <Route path="/system" element={<System />} />
         <Route path="/tags" element={<Navigate to="/memory" replace />} />
       </Route>
