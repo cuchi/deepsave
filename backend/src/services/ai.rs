@@ -1,48 +1,11 @@
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
-use base64::Engine;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::Config;
-
-/// Parsed DeepSeek extraction output (validated in the retry loop).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AiItem {
-    pub description: String,
-    #[serde(default)]
-    pub merchant: Option<String>,
-    pub amount_cents: i64,
-    #[serde(default)]
-    pub category: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub installment: Option<i32>,
-    #[serde(default)]
-    pub installment_count: Option<i32>,
-    #[serde(default)]
-    pub date: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AiExtraction {
-    #[serde(default)]
-    pub document_type: Option<String>,
-    #[serde(default)]
-    pub merchant: Option<String>,
-    #[serde(default)]
-    pub date: Option<String>,
-    #[serde(default)]
-    pub currency: Option<String>,
-    #[serde(default)]
-    pub items: Vec<AiItem>,
-}
 
 #[derive(Clone)]
 pub struct AiClient {
@@ -50,7 +13,6 @@ pub struct AiClient {
     api_key: String,
     base_url: String,
     model: String,
-    vision_model: String,
     input_price_per_m: f64,
     cache_hit_price_per_m: f64,
     output_price_per_m: f64,
@@ -64,7 +26,6 @@ impl AiClient {
             api_key: config.deepseek_api_key.clone().unwrap_or_default(),
             base_url: config.deepseek_base_url.trim_end_matches('/').to_string(),
             model: config.deepseek_model.clone(),
-            vision_model: config.deepseek_vision_model.clone(),
             input_price_per_m: config.deepseek_input_price_per_m,
             cache_hit_price_per_m: config.deepseek_cache_hit_price_per_m,
             output_price_per_m: config.deepseek_output_price_per_m,
@@ -78,19 +39,6 @@ impl AiClient {
 
     pub fn text_model(&self) -> &str {
         &self.model
-    }
-
-    pub fn vision_model(&self) -> &str {
-        &self.vision_model
-    }
-
-    /// Build the user content for a vision request (image + optional prompt text).
-    pub fn vision_user(image_bytes: &[u8], mime: &str, prompt: &str) -> Value {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
-        json!([
-            { "type": "text", "text": prompt },
-            { "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{b64}") } }
-        ])
     }
 
     /// Call the chat completions API with JSON mode; returns the parsed JSON content.
@@ -143,16 +91,14 @@ impl AiClient {
 
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        let snippet: String = text.chars().take(500).collect();
         if !status.is_success() {
             self.record_call(
                 document_id, purpose, model, 0, 0, 0, 0, 0, 0.0, duration_ms, "error",
-                Some(truncate(&text, 500)),
+                Some(snippet.clone()),
             )
             .await;
-            return Err(anyhow!(
-                "DeepSeek API error {status}: {}",
-                truncate(&text, 500)
-            ));
+            return Err(anyhow!("DeepSeek API error {status}: {snippet}"));
         }
 
         let parsed: Value =
@@ -230,91 +176,5 @@ impl AiClient {
         .bind(error_message)
         .execute(&self.pool)
         .await;
-    }
-}
-
-/// Build the (mostly) stable system prompt used for extraction.
-///
-/// The system prompt is a long, stable prefix (instructions + category list + memory)
-/// so DeepSeek's context cache can serve it cheaply; the variable document goes in
-/// the user message.
-pub async fn build_extraction_system_prompt(pool: &PgPool) -> Result<String> {
-    let cats: Vec<(String,)> =
-        sqlx::query_as("SELECT name FROM categories WHERE is_active ORDER BY name")
-            .fetch_all(pool)
-            .await?;
-    let cat_list = cats
-        .iter()
-        .map(|c| c.0.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let memory: Vec<(String, String, Vec<String>)> = sqlx::query_as(
-        "SELECT m.merchant, COALESCE(c.name, ''), m.tags
-         FROM merchant_memory m
-         LEFT JOIN categories c ON c.id = m.category_id
-         WHERE m.confirm_count >= 2
-         ORDER BY m.confirm_count DESC
-         LIMIT 50",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mem_lines = memory
-        .iter()
-        .filter(|(_, c, t)| !c.is_empty() || !t.is_empty())
-        .map(|(m, c, t)| {
-            if t.is_empty() {
-                format!("- {m} → {c}")
-            } else {
-                format!("- {m} → {c} [{}]", t.join(", "))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    Ok(format!(
-        r#"Você é um extrator de dados financeiros brasileiros. Responda APENAS com JSON válido (sem markdown, sem texto extra).
-
-Esquema JSON exato:
-{{
-  "document_type": "receipt" | "bank_statement" | "card_statement" | "payment_slip",
-  "merchant": string | null,
-  "date": "YYYY-MM-DD" | null,
-  "currency": "BRL",
-  "items": [
-    {{
-      "description": string,
-      "merchant": string | null,
-      "amount_cents": integer,
-      "category": string | null,
-      "tags": [string],
-      "kind": "expense" | "income" | "refund" | "internal",
-      "installment": integer | null,
-      "installment_count": integer | null,
-      "date": "YYYY-MM-DD" | null
-    }}
-  ]
-}}
-
-Regras:
-- amount_cents é um inteiro em centavos. NEGATIVO = despesa/saída. Positivo = receita/entrada.
-- "kind" padrão é "expense". Use "income" para receitas (inclui Pix/TED recebidos), "refund" para estornos.
-- Use "internal" para pagamentos da fatura do cartão de crédito (ex: "Pagamento Fatura"), investimentos (ex: emissão/resgate de CDB, impostos de fundos) e transferências entre contas do próprio usuário (ex: transferência da conta Nubank para a conta C6, Pix entre contas dele). Eles são rastreados mas NÃO contam como despesa/receita.
-- Ignore cabeçalhos, saldos e linhas de total. Extraia apenas itens individuais de gasto/receita.
-- Para parcelas (ex: 7/10), preencha installment=7 e installment_count=10.
-- "date" de cada item é a data da transação; se o documento tiver uma data única, pode repeti-la.
-- Use, quando possível, uma destas categorias: {cat_list}.
-
-Memória de categorização (comerciante → categoria):
-{mem_lines}
-"#
-    ))
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
     }
 }

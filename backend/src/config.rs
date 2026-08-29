@@ -32,6 +32,21 @@ pub struct Config {
     pub pluggy_client_id: Option<String>,
     pub pluggy_client_secret: Option<String>,
     pub pluggy_api_key: Option<String>,
+    /// Accounts to import (ids from the Pluggy dashboard — stable).
+    pub pluggy_accounts: Vec<PluggyAccountConf>,
+}
+
+/// One configured Pluggy account (from `PLUGGY_ACCOUNTS`, a JSON array).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PluggyAccountConf {
+    /// Pluggy account id (from the dashboard — never changes).
+    pub id: String,
+    /// Bank slug: 'nubank' | 'caixa' | 'c6'.
+    pub bank: String,
+    /// 'BANK' | 'CREDIT' — needed for sign conventions.
+    pub kind: String,
+    /// Display name.
+    pub name: String,
 }
 
 impl Config {
@@ -100,6 +115,15 @@ impl Config {
         let pluggy_api_key = std::env::var("PLUGGY_API_KEY")
             .ok()
             .filter(|s| !s.is_empty());
+        let pluggy_accounts = std::env::var("PLUGGY_ACCOUNTS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|raw| {
+                serde_json::from_str::<Vec<PluggyAccountConf>>(&raw)
+                    .context("PLUGGY_ACCOUNTS is not a valid JSON array")
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(Self {
             database_url,
@@ -122,6 +146,7 @@ impl Config {
             pluggy_client_id,
             pluggy_client_secret,
             pluggy_api_key,
+            pluggy_accounts,
         })
     }
 }

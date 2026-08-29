@@ -32,7 +32,6 @@ pub struct SystemInfo {
     pub storage_file_count: u64,
     pub table_counts: Vec<TableCount>,
     pub items_by_status: Vec<StatusCount>,
-    pub documents_by_status: Vec<StatusCount>,
 }
 
 pub async fn system(State(state): State<AppState>) -> Result<Json<SystemInfo>, AppError> {
@@ -49,7 +48,6 @@ pub async fn system_data(pool: &PgPool, storage_dir: &Path) -> Result<SystemInfo
 
     let table_counts = table_counts(pool).await?;
     let items_by_status = status_counts(pool, "items").await?;
-    let documents_by_status = status_counts(pool, "documents").await?;
 
     let (storage_size_bytes, storage_file_count) = storage_size(storage_dir).await;
 
@@ -59,7 +57,6 @@ pub async fn system_data(pool: &PgPool, storage_dir: &Path) -> Result<SystemInfo
         storage_file_count,
         table_counts,
         items_by_status,
-        documents_by_status,
     })
 }
 

@@ -2,11 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
+  banksApi,
   categoriesApi,
-  coverageApi,
   dashboardApi,
   recurringApi,
-  sourcesApi,
   tagsApi,
   type CategoryTotal,
   type DailyPoint,
@@ -425,8 +424,7 @@ export default function Charts() {
 
   const { data: categories = [] } = useQuery({ queryKey: ['categories'], queryFn: categoriesApi.list })
   const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: tagsApi.list })
-  const { data: sources = [] } = useQuery({ queryKey: ['sources'], queryFn: sourcesApi.list })
-  const { data: coverage } = useQuery({ queryKey: ['coverage'], queryFn: coverageApi.get })
+  const { data: banks = [] } = useQuery({ queryKey: ['banks'], queryFn: banksApi.list })
 
   const params = useMemo(() => dashboardParams(filters), [filters])
   // Full day list for the stacked bar (zero days included when a range is set).
@@ -473,17 +471,6 @@ export default function Charts() {
   // Count of active rules with a scheduled next date (forecast).
   const upcomingCount = recurring.filter((r) => r.is_active && r.next_due_on).length
 
-  const banks = [...new Set(sources.map((s) => s.bank))].sort()
-
-  // The missing-sources alert is month-specific: only show it when the whole
-  // range falls inside a single calendar month.
-  const rangeMonth =
-    filters.dateFrom && filters.dateTo && filters.dateFrom.slice(0, 7) === filters.dateTo.slice(0, 7)
-      ? filters.dateTo.slice(0, 7)
-      : null
-  const missingSources = rangeMonth
-    ? (coverage?.sources ?? []).filter((s) => s.enabled && !s.present.includes(rangeMonth))
-    : []
 
   const rangeLabel = useMemo(() => {
     if (!filters.dateFrom && !filters.dateTo) {
@@ -510,12 +497,6 @@ export default function Charts() {
         banks={banks}
         searchPlaceholder="Buscar nos gráficos…"
       />
-
-      {missingSources.length > 0 && (
-        <div className="mb-4 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
-          Fontes faltando em {rangeMonth}: {missingSources.map((s) => s.name).join(', ')}
-        </div>
-      )}
 
       <div className="mb-4 rounded border border-zinc-800 bg-zinc-900">
         <button

@@ -2,20 +2,14 @@ import axios from 'axios'
 import type {
   AiTagBatch,
   Category,
-  CoverageData,
-  DocumentDetail,
-  DocumentSummary,
   Item,
   ItemSummary,
-  MatchDetail,
   MerchantProfile,
-  PluggyConnector,
-  PluggyItem,
+  PluggyAccount,
   PluggyStatus,
   PluggySyncResult,
   RecurringOccurrence,
   RecurringRule,
-  Source,
   SuggestionDetail,
   TagUsage,
 } from '../lib/types'
@@ -158,50 +152,6 @@ export const itemsApi = {
   },
 }
 
-export type DocumentKind =
-  | 'card_statement'
-  | 'bank_statement'
-  | 'receipt'
-  | 'payment_slip'
-
-export const documentsApi = {
-  async list(): Promise<DocumentSummary[]> {
-    return (await api.get<DocumentSummary[]>('/documents')).data
-  },
-  async get(id: string): Promise<DocumentDetail> {
-    return (await api.get<DocumentDetail>(`/documents/${id}`)).data
-  },
-  async upload(kind: DocumentKind, file: File): Promise<DocumentSummary> {
-    const form = new FormData()
-    form.append('kind', kind)
-    form.append('file', file)
-    return (await api.post<DocumentSummary>('/documents', form)).data
-  },
-  async remove(id: string): Promise<{ ok: boolean }> {
-    return (await api.delete(`/documents/${id}`)).data
-  },
-  async reprocess(id: string): Promise<{ ok: boolean }> {
-    return (await api.post(`/documents/${id}/reprocess`)).data
-  },
-}
-
-export const matchesApi = {
-  async list(status?: string): Promise<MatchDetail[]> {
-    return (await api.get<MatchDetail[]>('/matches', {
-      params: status ? { status } : {},
-    })).data
-  },
-  async suggest(): Promise<{ suggested: number }> {
-    return (await api.post('/matches/suggest')).data
-  },
-  async accept(id: string): Promise<{ ok: boolean }> {
-    return (await api.post(`/matches/${id}/accept`)).data
-  },
-  async reject(id: string): Promise<{ ok: boolean }> {
-    return (await api.post(`/matches/${id}/reject`)).data
-  },
-}
-
 export interface CategoryTotal {
   category_id: string
   name: string
@@ -309,21 +259,6 @@ export const dashboardApi = {
   /** Flat, dated feed of the next obligations within `days`. */
   async upcoming(days = 90): Promise<UpcomingItem[]> {
     return (await api.get<UpcomingItem[]>('/dashboard/upcoming', { params: { days } })).data
-  },
-}
-
-export const sourcesApi = {
-  async list(): Promise<Source[]> {
-    return (await api.get<Source[]>('/sources')).data
-  },
-  async update(id: string, input: { name?: string; enabled?: boolean }): Promise<Source> {
-    return (await api.patch<Source>(`/sources/${id}`, input)).data
-  },
-}
-
-export const coverageApi = {
-  async get(): Promise<CoverageData> {
-    return (await api.get<CoverageData>('/coverage')).data
   },
 }
 
@@ -501,38 +436,24 @@ export const systemApi = {
   },
 }
 
-export interface PluggyCreateInput {
-  connector_id: number
-  parameters?: Record<string, string>
-  client_user_id?: string
+
+export const banksApi = {
+  async list(): Promise<string[]> {
+    return (await api.get<string[]>('/banks')).data
+  },
 }
 
 export const pluggyApi = {
   async status(): Promise<PluggyStatus> {
     return (await api.get<PluggyStatus>('/pluggy/status')).data
   },
-  async connectors(): Promise<PluggyConnector[]> {
-    return (await api.get<PluggyConnector[]>('/pluggy/connectors')).data
+  async accounts(): Promise<PluggyAccount[]> {
+    return (await api.get<PluggyAccount[]>('/pluggy/accounts')).data
   },
-  async list(): Promise<PluggyItem[]> {
-    return (await api.get<PluggyItem[]>('/pluggy/items')).data
-  },
-  async create(input: PluggyCreateInput): Promise<PluggyItem> {
-    return (await api.post<PluggyItem>('/pluggy/items', input)).data
-  },
-  async refresh(id: string): Promise<PluggyItem> {
-    return (await api.post<PluggyItem>(`/pluggy/items/${id}/refresh`)).data
-  },
-  async sync(id: string): Promise<PluggySyncResult> {
-    return (await api.post<PluggySyncResult>(`/pluggy/items/${id}/sync`)).data
-  },
-  async import(id: string): Promise<PluggySyncResult> {
-    return (await api.post<PluggySyncResult>(`/pluggy/items/${id}/import`)).data
-  },
-  async syncAll(): Promise<{ done: number; imported: number }> {
-    return (await api.post<{ done: number; imported: number }>('/pluggy/sync-all')).data
-  },
-  async remove(id: string): Promise<{ ok: boolean }> {
-    return (await api.delete(`/pluggy/items/${id}`)).data
+  /** Incremental by default; pass from/to (YYYY-MM-DD) to force a period. */
+  async sync(from?: string, to?: string): Promise<PluggySyncResult> {
+    return (await api.post<PluggySyncResult>('/pluggy/sync', undefined, {
+      params: from || to ? { from, to } : {},
+    })).data
   },
 }

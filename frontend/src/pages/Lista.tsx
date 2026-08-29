@@ -3,11 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   aiTagsApi,
+  banksApi,
   categoriesApi,
-  documentsApi,
   itemsApi,
   recurringApi,
-  sourcesApi,
   tagsApi,
   type BulkItemUpdateInput,
 } from '../api/client'
@@ -34,7 +33,7 @@ const KIND_LABELS: Record<string, string> = {
 }
 
 function shortDate(ymd: string): string {
-  return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`
+  return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}/${ymd.slice(0, 4)}`
 }
 
 function itemTitle(it: Item): string {
@@ -72,9 +71,8 @@ export default function Lista() {
   const qc = useQueryClient()
 
   const { data: categories = [] } = useQuery({ queryKey: ['categories'], queryFn: categoriesApi.list })
-  const { data: sources = [] } = useQuery({ queryKey: ['sources'], queryFn: sourcesApi.list })
+  const { data: banks = [] } = useQuery({ queryKey: ['banks'], queryFn: banksApi.list })
   const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: tagsApi.list })
-  const { data: docs = [] } = useQuery({ queryKey: ['documents'], queryFn: documentsApi.list })
   const { data: rules = [] } = useQuery({ queryKey: ['recurring'], queryFn: recurringApi.list })
 
   const { data: items = [], isLoading, isPlaceholderData } = useQuery({
@@ -185,11 +183,7 @@ export default function Lista() {
   ])
 
   const catById = new Map(categories.map((c) => [c.id, c]))
-  const bankBySource = new Map(sources.map((s) => [s.id, s.bank]))
-  const banks = [...new Set(sources.map((s) => s.bank))].sort()
-  const bankByDoc = new Map(
-    docs.map((d) => [d.id, d.source_id ? bankBySource.get(d.source_id) : undefined]),
-  )
+  const bankByDoc = new Map<string, string | undefined>()
 
   const byParent = new Map<string | null, Item[]>()
   for (const it of items) {
@@ -241,18 +235,22 @@ export default function Lista() {
   const renderRoot = (it: Item) => {
     const children = byParent.get(it.id) ?? []
     const hasChildren = children.length > 0
-    const receiptDocId = children[0]?.document_id
     const cat = it.category_id ? catById.get(it.category_id) : undefined
-    const bank = it.document_id ? bankByDoc.get(it.document_id) : undefined
+    const bank = it.bank ?? (it.document_id ? bankByDoc.get(it.document_id) : undefined)
     const kindLabel = KIND_LABELS[it.kind]
     const open = menuFor === it.id
     const detailsOpen = detailsFor === it.id
     const allocated = childSum.get(it.id) ?? 0
     const remainder = Math.abs(it.amount_cents) - allocated
+    const legacy = !it.external_id && it.source !== 'pluggy'
 
     return (
       <div key={it.id}>
-        <div className="group relative flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
+        <div
+          className={`group relative flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 ${
+            legacy ? 'rounded border-l-2 border-amber-500 bg-amber-500/15' : ''
+          }`}
+        >
           <input
             type="checkbox"
             checked={selected.has(it.id)}
@@ -277,9 +275,14 @@ export default function Lista() {
             {detailsOpen ? '▾' : '▸'}
           </button>
           <BankLogo bank={bank} />
-          <span className="w-10 shrink-0 text-xs tabular-nums text-zinc-500">
+          <span className="w-[4.6rem] shrink-0 text-xs tabular-nums text-zinc-500">
             {shortDate(it.occurred_on)}
           </span>
+          {legacy && (
+            <span className="shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+              legado
+            </span>
+          )}
           <button
             onClick={() => setDetailsFor(detailsOpen ? null : it.id)}
             className="min-w-0 flex-1 truncate text-left text-sm hover:text-zinc-200"
@@ -300,6 +303,11 @@ export default function Lista() {
           {kindLabel && (
             <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
               {kindLabel}
+            </span>
+          )}
+          {it.kind === 'refund' && it.refunded_item_id && (
+            <span className="shrink-0 rounded bg-emerald-950 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+              ↔ reembolso
             </span>
           )}
           {it.recurring_id && (
@@ -336,17 +344,6 @@ export default function Lista() {
             {signOf(it.amount_cents)}
             {fmtCents(it.amount_cents)}
           </span>
-          {receiptDocId && (
-            <a
-              href={`/api/documents/${receiptDocId}/file`}
-              target="_blank"
-              rel="noreferrer"
-              title="Ver recibo"
-              className="shrink-0 text-zinc-500 hover:text-zinc-200"
-            >
-              🧾
-            </a>
-          )}
           <button
             onClick={() => setMenuFor(open ? null : it.id)}
             aria-label="Ações do item"
@@ -473,7 +470,7 @@ export default function Lista() {
               </p>
             )}
             <p>
-              Fonte: {it.source} · Tipo: {it.kind}
+              Fonte: {it.source_label ?? it.source} · Tipo: {it.kind}
             </p>
           </div>
         )}

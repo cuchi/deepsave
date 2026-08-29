@@ -75,35 +75,60 @@ pub struct TrendPoint {
 /// date_to, search, category_ids, kind, tags, bank, installments. Unlike the
 /// items list, rejected items are always excluded (they're not real activity).
 const AGG_FILTERS: &str = "
-    ($1::date IS NULL OR occurred_on >= $1)
-    AND ($2::date IS NULL OR occurred_on <= $2)
-    AND status != 'rejected'
+    ($1::date IS NULL OR items.occurred_on >= $1)
+    AND ($2::date IS NULL OR items.occurred_on <= $2)
+    AND items.status != 'rejected'
     AND ($3::text IS NULL
-         OR description ILIKE '%' || $3 || '%'
-         OR COALESCE(merchant, '') ILIKE '%' || $3 || '%'
-         OR array_to_string(tags, ' ') ILIKE '%' || $3 || '%')
+         OR items.description ILIKE '%' || $3 || '%'
+         OR COALESCE(items.merchant, '') ILIKE '%' || $3 || '%'
+         OR array_to_string(items.tags, ' ') ILIKE '%' || $3 || '%')
     AND (cardinality($4) = 0
-         OR category_id::text = ANY($4)
-         OR ('__none' = ANY($4) AND category_id IS NULL))
-    AND ($5::text IS NULL OR kind = $5)
+         OR items.category_id::text = ANY($4)
+         OR ('__none' = ANY($4) AND items.category_id IS NULL))
+    AND ($5::text IS NULL OR items.kind = $5
+         OR ($5 = 'expense' AND items.kind = 'refund' AND rc.kind = 'expense'))
     AND (cardinality($6) = 0
-         OR tags && $6
-         OR ('__none' = ANY($6) AND cardinality(tags) = 0))
+         OR items.tags && $6
+         OR ('__none' = ANY($6) AND cardinality(items.tags) = 0))
     AND ($7::text IS NULL OR EXISTS (
           SELECT 1 FROM documents d
           JOIN sources s ON s.id = d.source_id
           WHERE d.id = items.document_id AND s.bank = $7))
     AND ($8::text IS NULL OR $8 = 'all'
-         OR ($8 = 'first_only' AND NOT (COALESCE(installment_count, 0) > 1 AND COALESCE(installment, 0) > 1))
-         OR ($8 = 'only' AND COALESCE(installment_count, 0) > 1))
+         OR ($8 = 'first_only' AND NOT (COALESCE(items.installment_count, 0) > 1 AND COALESCE(items.installment, 0) > 1))
+         OR ($8 = 'only' AND COALESCE(items.installment_count, 0) > 1))
 ";
 
 /// When the installments filter is 'first_only', the first parcel stands in for
 /// the whole purchase (parcel × count). References $8 (the installments param).
 const AGG_AMOUNT_ADJ: &str = "
-    CASE WHEN $8 = 'first_only' AND installment_count > 1 AND installment = 1
-         THEN amount_cents * installment_count
-         ELSE amount_cents END";
+    CASE WHEN $8 = 'first_only' AND items.installment_count > 1 AND items.installment = 1
+         THEN items.amount_cents * items.installment_count
+         ELSE items.amount_cents END";
+
+/// Expense side of spend aggregations: an expense, or a **linked refund** — the
+/// latter subtracts (money back) exactly where its charge was counted. Requires
+/// the `rc` join (the charge) to be present. Self-contained (no nested
+/// `{…}` placeholders — `format!` would not expand them inside a substituted
+/// const), so the first_only installment adjustment is inlined for expenses.
+const NET_AMOUNT: &str = "
+    CASE WHEN items.kind = 'expense' THEN -(
+           CASE WHEN $8 = 'first_only' AND items.installment_count > 1 AND items.installment = 1
+                THEN items.amount_cents * items.installment_count
+                ELSE items.amount_cents END)
+         WHEN items.kind = 'refund' AND rc.kind = 'expense' THEN -items.amount_cents
+         ELSE 0 END";
+
+/// Bucket key: the charge's field when the row is a linked refund (so the
+/// refund nets in the charge's month/category/merchant).
+const BUCKET_DATE: &str = "COALESCE(rc.occurred_on, items.occurred_on)";
+const BUCKET_CAT: &str = "COALESCE(rc.category_id, items.category_id)";
+const BUCKET_MERCHANT: &str = "COALESCE(rc.merchant, items.merchant)";
+const BUCKET_TAGS: &str = "COALESCE(rc.tags, items.tags)";
+/// Expense rows: expenses plus refunds linked to an expense charge.
+const EXPENSE_OR_REFUND: &str = "(items.kind = 'expense' OR (items.kind = 'refund' AND rc.kind = 'expense'))";
+/// Join to the charge a refund reverses (netting target).
+const REFUND_JOIN: &str = "LEFT JOIN items rc ON rc.id = items.refunded_item_id AND rc.kind = 'expense'";
 
 /// Resolve the aggregation window: explicit date range wins; else `month`;
 /// else no date filter (all history). The UI pre-fills the last complete month
@@ -175,10 +200,11 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     let category_ids = split_filters(&q.category_ids);
     let tags = split_filters(&q.tags);
     let (spend, income): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT COALESCE(SUM(CASE WHEN kind = 'expense' THEN -{AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint,
-                COALESCE(SUM(CASE WHEN kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
+        "SELECT COALESCE(SUM({NET_AMOUNT}), 0)::bigint,
+                COALESCE(SUM(CASE WHEN items.kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
          FROM items
-         WHERE parent_id IS NULL AND {AGG_FILTERS}"
+         {REFUND_JOIN}
+         WHERE items.parent_id IS NULL AND {AGG_FILTERS}"
     )))
     .bind(from)
     .bind(to)
@@ -195,8 +221,9 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
         "SELECT c.id AS category_id, c.name AS name, c.color AS color,
                 COALESCE(SUM(-{AGG_AMOUNT_ADJ}), 0)::bigint AS total_cents
          FROM items
-         JOIN categories c ON c.id = items.category_id
-         WHERE items.parent_id IS NULL AND items.kind = 'expense' AND {AGG_FILTERS}
+         {REFUND_JOIN}
+         JOIN categories c ON c.id = {BUCKET_CAT}
+         WHERE items.parent_id IS NULL AND {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
          GROUP BY c.id, c.name, c.color
          ORDER BY total_cents DESC"
     )))
@@ -212,11 +239,12 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     .await?;
 
     let top_merchants: Vec<MerchantTotal> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT merchant, SUM(-{AGG_AMOUNT_ADJ})::bigint AS total_cents
+        "SELECT {BUCKET_MERCHANT} AS merchant, SUM(-{AGG_AMOUNT_ADJ})::bigint AS total_cents
          FROM items
-         WHERE items.parent_id IS NULL AND items.kind = 'expense' AND merchant IS NOT NULL
+         {REFUND_JOIN}
+         WHERE items.parent_id IS NULL AND {EXPENSE_OR_REFUND} AND {BUCKET_MERCHANT} IS NOT NULL
            AND {AGG_FILTERS}
-         GROUP BY merchant
+         GROUP BY {BUCKET_MERCHANT}
          ORDER BY total_cents DESC
          LIMIT 10"
     )))
@@ -270,11 +298,12 @@ pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>
     let end = end_month + Months::new(1) - chrono::Duration::days(1); // inclusive last day
 
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT to_char(occurred_on, 'YYYY-MM'),
-                COALESCE(SUM(CASE WHEN kind = 'expense' THEN -{AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint,
-                COALESCE(SUM(CASE WHEN kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
+        "SELECT to_char({BUCKET_DATE}, 'YYYY-MM'),
+                COALESCE(SUM({NET_AMOUNT}), 0)::bigint,
+                COALESCE(SUM(CASE WHEN items.kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
          FROM items
-         WHERE parent_id IS NULL AND {AGG_FILTERS}
+         {REFUND_JOIN}
+         WHERE items.parent_id IS NULL AND {AGG_FILTERS}
          GROUP BY 1
          ORDER BY 1"
     )))
@@ -361,14 +390,15 @@ pub async fn daily_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<DailyPoint>
     let category_ids = split_filters(&q.category_ids);
     let tags = split_filters(&q.tags);
     let rows = sqlx::query_as::<_, DailyPoint>(sqlx::AssertSqlSafe(format!(
-        "SELECT items.occurred_on AS date,
+        "SELECT {BUCKET_DATE} AS date,
                 CASE WHEN $9 = 'category' THEN COALESCE(c.name, 'Sem categoria') END AS key,
                 SUM(-{AGG_AMOUNT_ADJ})::bigint AS total_cents
          FROM items
-         LEFT JOIN categories c ON c.id = items.category_id
-         WHERE items.parent_id IS NULL AND items.kind = 'expense' AND {AGG_FILTERS}
-         GROUP BY items.occurred_on, key
-         ORDER BY items.occurred_on, key"
+         {REFUND_JOIN}
+         LEFT JOIN categories c ON c.id = {BUCKET_CAT}
+         WHERE items.parent_id IS NULL AND {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
+         GROUP BY {BUCKET_DATE}, key
+         ORDER BY {BUCKET_DATE}, key"
     )))
     .bind(q.date_from)
     .bind(q.date_to)
@@ -398,8 +428,10 @@ pub async fn tags_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<TagTotal>, A
     let tags = split_filters(&q.tags);
     let rows = sqlx::query_as::<_, TagTotal>(sqlx::AssertSqlSafe(format!(
         "SELECT tag, SUM(-{AGG_AMOUNT_ADJ})::bigint AS total_cents
-         FROM items CROSS JOIN LATERAL unnest(items.tags) AS tag
-         WHERE items.parent_id IS NULL AND items.kind = 'expense' AND {AGG_FILTERS}
+         FROM items
+         {REFUND_JOIN}
+         CROSS JOIN LATERAL unnest({BUCKET_TAGS}) AS tag
+         WHERE items.parent_id IS NULL AND {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
          GROUP BY tag
          ORDER BY total_cents DESC
          LIMIT 10"

@@ -245,3 +245,32 @@ async fn daily_respects_date_range_filter(pool: PgPool) {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].total_cents, 200);
 }
+
+#[sqlx::test]
+async fn linked_refunds_net_against_their_charge(pool: PgPool) {
+    common::migrate(&pool).await;
+    insert_item(&pool, "Tarifa Anuidade", -9800, "2026-01-01", "expense").await;
+    insert_item(&pool, "Estorno Tarifa", 9800, "2026-01-03", "refund").await;
+    // An unlinked refund must NOT affect spend.
+    insert_item(&pool, "Refund solto", 5000, "2026-01-05", "refund").await;
+    insert_item(&pool, "Compra normal", -3000, "2026-01-10", "expense").await;
+
+    // Link the estorno to its charge.
+    let charge_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM items WHERE description = 'Tarifa Anuidade'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE items SET refunded_item_id = $1 WHERE description = 'Estorno Tarifa'")
+        .bind(charge_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let d = dashboard_data(&pool, &dash_q()).await.unwrap();
+    // 9800 charge − 9800 linked refund = 0; the unlinked +5000 refund is not
+    // counted anywhere; the -3000 expense remains.
+    assert_eq!(d.total_spend_cents, 3000);
+    assert_eq!(d.total_income_cents, 0);
+}

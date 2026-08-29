@@ -50,6 +50,11 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET not set in .env}
       APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD not set in .env}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Pluggy (open-banking) — optional; without these the /pluggy UI is disabled
+      PLUGGY_API_KEY: ${PLUGGY_API_KEY:-}
+      PLUGGY_CLIENT_ID: ${PLUGGY_CLIENT_ID:-}
+      PLUGGY_CLIENT_SECRET: ${PLUGGY_CLIENT_SECRET:-}
+      PLUGGY_ACCOUNTS: ${PLUGGY_ACCOUNTS:-}
       # Send the session cookie only over HTTPS (set true in .env for the public deploy)
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # DEEPSEEK_BASE_URL: https://api.deepseek.com

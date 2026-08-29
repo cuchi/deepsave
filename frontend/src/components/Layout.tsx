@@ -7,8 +7,6 @@ const NAV_LINKS = [
   { to: '/', label: 'Gráficos' },
   { to: '/lista', label: 'Lista' },
   { to: '/forecast', label: 'Previsão' },
-  { to: '/upload', label: 'Documentos' },
-  { to: '/review', label: 'Revisar' },
   { to: '/memory', label: 'Memória' },
   { to: '/recurring', label: 'Recorrentes' },
   { to: '/pluggy', label: 'Pluggy' },

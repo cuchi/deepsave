@@ -35,5 +35,5 @@
 - Budgeting (per-category monthly budgets).
 - Multi-currency accounting / FX logic.
 - Mobile apps (responsive web only).
-- ~~Automatic bank API integrations~~ — **done via Pluggy** (see `/pluggy` UI):
-  sandbox connector (MeuPluggy) works end-to-end; live banks need the OAuth/browser flow.
+- ~~Automatic bank API integrations~~ — **done via Pluggy** (see `/pluggy` UI).
+- ~~Document uploads~~ — **decommissioned** in favor of Pluggy (existing document rows stay as legacy data).

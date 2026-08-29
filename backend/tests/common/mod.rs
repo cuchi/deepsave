@@ -2,7 +2,6 @@
 #![allow(dead_code)]
 
 use deepsave_backend::config::Config;
-use deepsave_backend::models::DocumentRow;
 use deepsave_backend::services::ai::AiClient;
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -43,6 +42,7 @@ pub fn test_config(base_url: String) -> Config {
         pluggy_client_id: None,
         pluggy_client_secret: None,
         pluggy_api_key: None,
+        pluggy_accounts: vec![],
     }
 }
 
@@ -51,29 +51,6 @@ pub fn ai_client(pool: PgPool, base_url: String) -> AiClient {
     AiClient::new(&config, pool)
 }
 
-/// Insert a `pending` document row pointing at a fixture file.
-pub async fn insert_document(
-    pool: &PgPool,
-    kind: &str,
-    filename: &str,
-    content_type: &str,
-    file_path: &str,
-) -> DocumentRow {
-    sqlx::query_as::<_, DocumentRow>(
-        "INSERT INTO documents (kind, filename, content_type, sha256, file_path, status)
-         VALUES ($1, $2, $3, $4, $5, 'pending')
-         RETURNING id, kind, account_id, source_id, filename, content_type, sha256,
-                   file_path, status, error_message, ocr_text, uploaded_at, processed_at",
-    )
-    .bind(kind)
-    .bind(filename)
-    .bind(content_type)
-    .bind(Uuid::new_v4().to_string())
-    .bind(file_path)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
 
 /// Start a mock DeepSeek server that returns a fixed extraction (with the given items).
 pub async fn mount_deepseek_mock(items: Value) -> MockServer {

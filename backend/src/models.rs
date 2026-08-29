@@ -79,6 +79,16 @@ pub struct Item {
     pub match_confidence: Option<f32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Bank slug (nubank|caixa|c6) — derived from the source document or the
+    /// Pluggy account, populated by item queries.
+    pub bank: Option<String>,
+    /// Display label of the source account ("Nubank - Cartão", …).
+    pub source_label: Option<String>,
+    /// Pluggy transaction id — `NULL` for legacy document items not yet merged.
+    pub external_id: Option<String>,
+    /// The expense this refund reverses (`kind = 'refund'` → charge id). Graphs
+    /// net linked refunds against their charge.
+    pub refunded_item_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,88 +156,7 @@ pub struct BulkItemUpdate {
     pub update_memory: bool,
 }
 
-// ---------- Documents ----------
-
-/// Full document row (used internally by the worker).
-#[derive(Debug, Clone, FromRow)]
-pub struct DocumentRow {
-    pub id: Uuid,
-    pub kind: String,
-    pub account_id: Option<Uuid>,
-    pub source_id: Option<Uuid>,
-    pub filename: String,
-    pub content_type: String,
-    pub sha256: String,
-    pub file_path: String,
-    pub status: String,
-    pub error_message: Option<String>,
-    pub ocr_text: Option<String>,
-    pub uploaded_at: DateTime<Utc>,
-    pub processed_at: Option<DateTime<Utc>>,
-}
-
-/// List item for documents (no heavy `ocr_text`).
-#[derive(Debug, Clone, FromRow, Serialize)]
-pub struct DocumentSummary {
-    pub id: Uuid,
-    pub kind: String,
-    pub filename: String,
-    pub content_type: String,
-    pub status: String,
-    pub error_message: Option<String>,
-    pub uploaded_at: DateTime<Utc>,
-    pub processed_at: Option<DateTime<Utc>>,
-    pub item_count: i64,
-    pub source_id: Option<Uuid>,
-    pub first_date: Option<NaiveDate>,
-    pub last_date: Option<NaiveDate>,
-}
-
-/// Full document detail for the API.
-#[derive(Debug, Clone, Serialize)]
-pub struct DocumentDetail {
-    pub id: Uuid,
-    pub kind: String,
-    pub filename: String,
-    pub content_type: String,
-    pub status: String,
-    pub error_message: Option<String>,
-    pub uploaded_at: DateTime<Utc>,
-    pub processed_at: Option<DateTime<Utc>>,
-    pub ocr_text: Option<String>,
-    pub items: Vec<Item>,
-    pub source_id: Option<Uuid>,
-}
-
 // ---------- Accounts ----------
-
-// ---------- Matches (receipt → statement links) ----------
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MatchDetail {
-    pub id: Uuid,
-    pub parent_item_id: Uuid,
-    pub child_item_id: Uuid,
-    pub source: String,
-    pub confidence: f32,
-    pub status: String,
-    pub parent: Item,
-    pub child: Item,
-}
-
-// ---------- Sources ----------
-
-#[derive(Debug, Clone, FromRow, Serialize)]
-pub struct Source {
-    pub id: Uuid,
-    pub bank: String,
-    pub kind: String,
-    pub name: String,
-    pub enabled: bool,
-    pub account_id: Option<Uuid>,
-    pub sort_order: i32,
-    pub created_at: DateTime<Utc>,
-}
 
 // ---------- Merchant memory ----------
 

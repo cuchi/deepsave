@@ -4,7 +4,7 @@ Guidance for agents working on this repo. The design source of truth is [`PLAN.m
 
 ## What this is
 
-DeepSave: single-user, self-hosted personal finance app. Upload statements/receipts, DeepSeek extracts/categorizes/link items into a monthly spending tree.
+DeepSave: single-user, self-hosted personal finance app. Transactions are imported from the banks via **Pluggy** (open-banking API) and categorized into a monthly spending tree. The old document-upload import (statements/faturas/receipts) has been **decommissioned** — the tables and rows remain as legacy data, but nothing imports through them anymore.
 
 - Backend: Rust (Axum + SQLx 0.9 + PostgreSQL 16)
 - Frontend: React 18 + Vite + TypeScript + Tailwind v4 + TanStack Query
@@ -32,12 +32,11 @@ cd frontend && npm run build       # type-check + build frontend
 
 ## Tests
 
-- All backend tests live in `backend/tests/` (unit tests in `tests/parsers.rs`, full-flow
-  integration tests in `tests/ingestion.rs`).
-- Fixtures are **fake/anonymized** under `backend/tests/fixtures/` — never use `examples/`
-  in tests (it's gitignored and contains real data).
+- All backend tests live in `backend/tests/`. Unit tests for the Pluggy mapping/dedupe
+  matcher are in `backend/src/services/pluggy.rs` (`#[cfg(test)]`); the full import
+  pipeline is exercised in `tests/pluggy.rs`.
 - Integration tests use `#[sqlx::test]` (needs a Postgres reachable via `DATABASE_URL`,
-  e.g. the docker-compose Postgres) and `wiremock` to fake the DeepSeek API.
+  e.g. the docker-compose Postgres) and `wiremock` to fake the Pluggy/DeepSeek APIs.
 
 ## Conventions & gotchas
 
@@ -54,17 +53,14 @@ cd frontend && npm run build       # type-check + build frontend
 - **Auth**: single password (argon2), signed cookie `deepsave_session`; protected routes use `auth::require_auth` middleware. Dev default password: `deepsave`.
 - **Errors**: return `AppError` (in `backend/src/error.rs`) from handlers; it maps to JSON `{ "error": ... }`.
 - **JSON field names are snake_case** (match the Rust structs / DB columns).
-- **Documents are processed asynchronously** by a background worker (`backend/src/services/queue.rs`); `documents.status` goes `pending → processing → processed | failed`. Uploaded files live under `STORAGE_DIR` (container: `/app/storage`).
-- **Parsers** live in `backend/src/services/parsers/` — `csv.rs` (Nubank card/account, C6 card/bank) and `caixa_card.rs` (Caixa credit-card fatura PDF). Add new bank formats there. They produce `ParsedItem`s that are inserted as `confirmed`.
-- **OCR/PDF** text extraction is in `backend/src/services/extract.rs` (tesseract CLI + pdf-extract); AI structuring is the fallback for non-structured PDFs.
-- **Linking / memory** live in `backend/src/services/{linking,memory}.rs`. Receipt→statement match suggestions are created on receipt ingestion; confirm them via `/api/matches/{id}/accept`. Merchant memory (category + tags) is upserted on item confirm, on AI-tag apply, and on single-item edit (opt-out via `ItemInput.update_memory`, defaults on — the edit form has a "Salvar na memória" checkbox); injected into AI prompts (gated at `confirm_count >= 2`). Bulk applies go through **preview first** (`POST /memory/preview` lists the items that would change; `POST /memory/apply` touches only the selected ids).
+- **Memory** lives in `backend/src/services/memory.rs`. Merchant memory (category + tags) is upserted on item confirm, on AI-tag apply, and on single-item edit (opt-out via `ItemInput.update_memory`, defaults on — the edit form has a "Salvar na memória" checkbox). Bulk applies go through **preview first** (`POST /memory/preview` lists the items that would change; `POST /memory/apply` touches only the selected ids).
 - **Categories are intrinsic to a merchant; tags are situational.** Memory now records both:
   `merchant_memory` carries `category_id` (latest wins) **and** `tags` (accumulate/union over
   confirmations). Applying memory (`apply-memory` per item, `POST /memory/preview` + `/memory/apply`
   for bulk) sets the category (replace) **and adds** the remembered tags (never removes item tags).
   Tag rename/merge/delete cascade to items, recurring rules and merchant memory.
 - **Recurring items** live in `backend/src/services/recurring.rs` + `routes/recurring.rs`. Detection is suggestion-only (user confirms). Rules are **analytics-only — they never auto-create items** (avoids double-counting with statement items); `upcoming` is a pure forecast. Alias matching tolerates a trailing amount in the item name (`matches_alias`), so one alias covers varying payments like "PREST HAB 1847,32" / "PREST HAB 1832,10".
-- **Pluggy** (open-banking aggregation) lives in `backend/src/services/pluggy.rs` + `routes/pluggy.rs`, UI at `/pluggy`. Auth is **API-key first**: `PLUGGY_API_KEY` (single-user setups) is sent directly as `X-API-KEY` and never refreshed; `PLUGGY_CLIENT_ID`/`PLUGGY_CLIENT_SECRET` are only used as a fallback (`/auth` JWT flow, cached 90 min, auto-refreshed on 401). With none of them the `/pluggy` endpoints return a "not configured" state. Flow: create item → (OAuth connectors open `oauth_url` in a tab, Pluggy runs its own callback) → `POST /items/{id}/sync` triggers + polls a Pluggy update → on `UPDATED`/`LOGIN_DONE` it fetches accounts + transactions and imports them as `confirmed` items (`source = 'pluggy'`). Idempotency: `items.external_id` (partial unique index) stores Pluggy's transaction id; re-syncs insert nothing new. **Signs**: bank DEBIT → negative expense, CREDIT → positive income; card charges (positive DEBIT) → negative expense with `installment/installment_count` from `creditCardMetadata`; card-side payments/refunds (CREDIT on card accounts) are skipped (already visible on the bank side). `pluggy_accounts` maps 1:1 to `accounts` rows (`accounts.bank = 'BANK'|'CREDIT'`).
+- **Pluggy** (open-banking aggregation) lives in `backend/src/services/pluggy.rs` + `routes/pluggy.rs`, UI at `/pluggy`. **Config-driven, no items API**: account ids are read once from the Pluggy dashboard (they are stable) and listed in `PLUGGY_ACCOUNTS` (JSON array: `id`, `bank` `nubank|caixa|c6`, `kind` `BANK|CREDIT`, `name`); seeded into `pluggy_accounts` at startup and re-seeded on every sync. Auth is **API-key first**: `PLUGGY_API_KEY` (single-user setups) is sent directly as `X-API-KEY` and never refreshed; `PLUGGY_CLIENT_ID`/`PLUGGY_CLIENT_SECRET` are the fallback (`/auth` JWT flow, cached 90 min, auto-refreshed on 401). `POST /pluggy/sync` pulls `/v2/transactions` (cursor-paginated; the old `/transactions` is 410-deprecated) per account and imports them as `confirmed` items (`source = 'pluggy'`), idempotent via `items.external_id` (partial unique index). **Incremental by default**: `sync_all_accounts` fetches only transactions newer than the account's last imported date (minus a 3-day overlap for late-posted charges); pass `?from=&to=` (YYYY-MM-DD) to force a full re-pull of a custom period (the Pluggy UI has date inputs for this). Only new transactions are inserted (`ON CONFLICT DO NOTHING`) — existing rows are never touched. `link_refunds` (runs on every sync) links each refund to the expense it reverses. **Signs**: bank DEBIT → negative expense, CREDIT → positive income; card charges (positive DEBIT) → negative expense with `installment/installment_count` from `creditCardMetadata`; card-side payments/refunds (CREDIT on card accounts) are skipped; bank-side `Credit card payment` → `internal` (already on the card side). `pluggy_accounts` maps 1:1 to `accounts` rows. Per-item `bank` (legacy via `documents→sources`, Pluggy via `pluggy_accounts`) is computed in the item queries (`ITEM_COLS` / the list query); `GET /api/banks` feeds the filter dropdowns. **Refund netting**: `items.refunded_item_id` links a refund to the expense it reverses (`link_refunds` runs on every sync — exact |amount| + merchant tokens first, partial second; kind-agnostic, greedy, nearest-date tie-break). Graphs (`dashboard`, `trend`, `daily`, `categories`, `tags`) treat a linked refund as a negative expense bucketed by its **charge's** month/category/merchant (`NET_AMOUNT`/`BUCKET_*` fragments + the `rc` self-join), so a refunded expense nets to zero and nothing inflates; refunds linked to `internal` charges and unlinked refunds are left alone.
 
 ## Before committing
 

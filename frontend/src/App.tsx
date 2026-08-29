@@ -5,8 +5,6 @@ import Login from './pages/Login'
 import Charts from './pages/Charts'
 import Forecast from './pages/Forecast'
 import Lista from './pages/Lista'
-import Upload from './pages/Upload'
-import Review from './pages/Review'
 import Memory from './pages/Memory'
 import Recurring from './pages/Recurring'
 import Pluggy from './pages/Pluggy'
@@ -41,9 +39,6 @@ export default function App() {
         <Route path="/forecast" element={<Forecast />} />
         <Route path="/lista" element={<Lista />} />
         <Route path="/categories" element={<Navigate to="/memory" replace />} />
-        <Route path="/upload" element={<Upload />} />
-        <Route path="/review" element={<Review />} />
-        <Route path="/coverage" element={<Navigate to="/upload" replace />} />
         <Route path="/memory" element={<Memory />} />
         <Route path="/recurring" element={<Recurring />} />
         <Route path="/pluggy" element={<Pluggy />} />

@@ -9,7 +9,7 @@ use anyhow::Context;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::State;
 use axum::middleware;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
@@ -25,6 +25,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::routes::auth::LoginLimiter;
+use crate::config::PluggyAccountConf;
 use services::ai::AiClient;
 use services::pluggy::PluggyClient;
 
@@ -63,6 +64,8 @@ pub struct AppState {
     /// In-memory brute-force guard for the login endpoint.
     pub login_limiter: Arc<LoginLimiter>,
     pub pluggy: PluggyHandle,
+    /// Accounts to sync (from `PLUGGY_ACCOUNTS`).
+    pub pluggy_accounts: Vec<PluggyAccountConf>,
     password_hash: String,
 }
 
@@ -143,29 +146,18 @@ pub async fn run() -> anyhow::Result<()> {
         tracing::warn!("PLUGGY_API_KEY (or PLUGGY_CLIENT_ID/PLUGGY_CLIENT_SECRET) not set — pluggy integration disabled");
         PluggyHandle::default()
     };
-    tokio::spawn(services::queue::run_worker(pool.clone(), ai.clone()));
+    // Seed the configured accounts so the UI can list them before the first sync.
+    if pluggy.is_configured() {
+        let seeded = services::pluggy::seed_configured_accounts(&pool, &config.pluggy_accounts).await;
+        match seeded {
+            Ok(n) if n > 0 => info!("pluggy: {n} account(s) configured"),
+            Ok(_) => tracing::warn!("PLUGGY_ACCOUNTS is empty — nothing to sync"),
+            Err(e) => tracing::warn!("pluggy seed failed: {e:#}"),
+        }
+    } else if !config.pluggy_accounts.is_empty() {
+        tracing::warn!("PLUGGY_ACCOUNTS set but Pluggy credentials missing — integration disabled");
+    }
     tokio::spawn(services::ai_tags::run_worker(pool.clone(), ai.clone()));
-    tokio::spawn(services::sources::backfill_null_sources(pool.clone()));
-    {
-        let pool = pool.clone();
-        tokio::spawn(async move {
-            let _ = services::sources::backfill_statement_periods(pool).await;
-        });
-    }
-    {
-        let pool = pool.clone();
-        let storage_dir = storage_dir.clone();
-        tokio::spawn(async move {
-            // Idempotent: re-parses only documents with unassigned installment items.
-            let _ = services::series::backfill(&pool, &storage_dir).await;
-        });
-    }
-    {
-        let pool = pool.clone();
-        tokio::spawn(async move {
-            let _ = services::ingest::reclassify_pix_as_internal(&pool).await;
-        });
-    }
 
     let session_key = if config.session_secret.len() >= 32 {
         Key::derive_from(config.session_secret.as_bytes())
@@ -183,6 +175,7 @@ pub async fn run() -> anyhow::Result<()> {
         cookie_secure: config.cookie_secure,
         login_limiter: Arc::new(LoginLimiter::default()),
         pluggy,
+        pluggy_accounts: config.pluggy_accounts,
     };
 
     let protected = Router::new()
@@ -223,6 +216,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/items/{id}/link-recurring", post(routes::items::link_recurring))
         .route("/items/{id}/apply-memory", post(routes::items::apply_memory))
         .route("/items/{id}/accept-suggestion", post(routes::items::accept_suggestion))
+        .route("/banks", get(routes::items::banks))
         .route("/memory", get(routes::memory::list_memory).post(routes::memory::create_memory))
         .route(
             "/memory/{id}",
@@ -242,22 +236,6 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/recurring/merchants", get(routes::recurring::merchants))
         .route("/recurring/merchant-profile", get(routes::recurring::merchant_profile))
         .route("/recurring/monthly-cost", get(routes::recurring::monthly_cost))
-        .route(
-            "/documents",
-            get(routes::documents::list)
-                .post(routes::documents::upload)
-                .layer(DefaultBodyLimit::max(20 * 1024 * 1024)),
-        )
-        .route(
-            "/documents/{id}",
-            get(routes::documents::get).delete(routes::documents::delete),
-        )
-        .route("/documents/{id}/file", get(routes::documents::file))
-        .route("/documents/{id}/reprocess", post(routes::documents::reprocess))
-        .route("/matches", get(routes::matches::list))
-        .route("/matches/suggest", post(routes::matches::suggest))
-        .route("/matches/{id}/accept", post(routes::matches::accept))
-        .route("/matches/{id}/reject", post(routes::matches::reject))
         .route("/dashboard", get(routes::dashboard::dashboard))
         .route("/dashboard/trend", get(routes::dashboard::trend))
         .route("/dashboard/daily", get(routes::dashboard::daily))
@@ -265,18 +243,10 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/dashboard/expected", get(routes::dashboard::expected))
         .route("/dashboard/forecast", get(routes::dashboard::forecast))
         .route("/dashboard/upcoming", get(routes::dashboard::upcoming))
-        .route("/sources", get(routes::sources::list))
-        .route("/sources/{id}", patch(routes::sources::update))
-        .route("/coverage", get(routes::sources::coverage))
         .route("/system", get(routes::system::system))
         .route("/pluggy/status", get(routes::pluggy::status))
-        .route("/pluggy/connectors", get(routes::pluggy::connectors))
-        .route("/pluggy/items", get(routes::pluggy::list).post(routes::pluggy::create))
-        .route("/pluggy/items/{id}", axum::routing::delete(routes::pluggy::delete))
-        .route("/pluggy/items/{id}/refresh", post(routes::pluggy::refresh))
-        .route("/pluggy/items/{id}/sync", post(routes::pluggy::sync))
-        .route("/pluggy/items/{id}/import", post(routes::pluggy::import))
-        .route("/pluggy/sync-all", post(routes::pluggy::sync_all))
+        .route("/pluggy/accounts", get(routes::pluggy::accounts))
+        .route("/pluggy/sync", post(routes::pluggy::sync))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

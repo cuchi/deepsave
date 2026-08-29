@@ -32,65 +32,14 @@ export interface Item {
   match_confidence: number | null
   created_at: string
   updated_at: string
-}
-
-export interface DocumentSummary {
-  id: string
-  kind: string
-  filename: string
-  content_type: string
-  status: string
-  error_message: string | null
-  uploaded_at: string
-  processed_at: string | null
-  item_count: number
-  source_id: string | null
-  first_date: string | null
-  last_date: string | null
-}
-
-export interface DocumentDetail extends DocumentSummary {
-  ocr_text: string | null
-  items: Item[]
-}
-
-export interface MatchDetail {
-  id: string
-  parent_item_id: string
-  child_item_id: string
-  source: string
-  confidence: number
-  status: string
-  parent: Item
-  child: Item
-}
-
-export interface Source {
-  id: string
-  bank: string
-  kind: string
-  name: string
-  enabled: boolean
-  account_id: string | null
-  sort_order: number
-  created_at: string
-}
-
-export interface CoverageSource {
-  id: string
-  name: string
-  bank: string
-  kind: string
-  enabled: boolean
-  present: string[]
-  /** Months only partially covered by bank statements (period doesn't span the full month). */
-  partial: string[]
-  last_seen: string | null
-}
-
-export interface CoverageData {
-  months: string[]
-  sources: CoverageSource[]
+  /** Bank slug (nubank | caixa | c6) — derived from document source or Pluggy account. */
+  bank: string | null
+  /** Display label of the source account ("Nubank - Cartão", …). */
+  source_label: string | null
+  /** Pluggy transaction id — null for legacy document items not yet merged. */
+  external_id: string | null
+  /** The expense this refund reverses (null when unlinked). */
+  refunded_item_id: string | null
 }
 
 export interface RecurringRule {
@@ -185,60 +134,25 @@ export interface PluggyStatus {
   accounts: number
 }
 
-export interface PluggyConnector {
-  id: number
-  name: string
-  kind: string | null
-  oauth: boolean
-  mfa: boolean
-  open_finance: boolean
-  image_url: string | null
-  credentials: {
-    name: string
-    label: string | null
-    type: string | null
-    optional: boolean
-    placeholder: string | null
-  }[]
-}
-
 export interface PluggyAccount {
-  id: string
   pluggy_account_id: string
-  account_id: string | null
   name: string
   account_type: string | null
-  subtype: string | null
-  currency: string
-  balance: number | null
-  credit_limit: number | null
-  due_date: string | null
-  close_date: string | null
+  bank: string | null
   last_sync_at: string | null
+  item_count: number
+  first_date: string | null
+  last_date: string | null
 }
 
-export interface PluggyItem {
-  id: string
-  pluggy_id: string
-  connector_id: number | null
-  connector_name: string | null
-  status: string
-  execution_status: string | null
-  error: unknown
-  status_detail: string | null
-  last_updated_at: string | null
-  last_sync_at: string | null
-  created_at: string
-  item_count: number
-  oauth_url: string | null
-  accounts: PluggyAccount[]
+export interface PluggyAccountSync {
+  pluggy_account_id: string
+  name: string
+  new: number
 }
 
 export interface PluggySyncResult {
-  status: string
-  execution_status?: string | null
-  imported: number
-  pending?: boolean
-  error?: unknown
-  status_detail?: string | null
+  configured: number
+  accounts: PluggyAccountSync[]
+  new: number
 }

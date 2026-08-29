@@ -48,32 +48,38 @@ async fn system_info_reports_sizes_and_table_counts(pool: PgPool) {
 
     // Status breakdowns exist (may be empty on a fresh DB).
     assert!(info.items_by_status.is_empty());
-    assert!(info.documents_by_status.is_empty());
 }
 
 #[sqlx::test]
 async fn system_info_counts_rows_and_groups_by_status(pool: PgPool) {
     common::migrate(&pool).await;
-    common::insert_document(
-        &pool,
-        "bank_statement",
-        "c6_bank.csv",
-        "text/csv",
-        &common::fixture("c6_bank.csv"),
+
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
+         VALUES ('pluggy', 'expense', 'confirmed', '2026-07-01', 'Teste', -1000)",
     )
-    .await;
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
+         VALUES ('pluggy', 'expense', 'confirmed', '2026-07-02', 'Teste 2', -2000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let info = system_data(&pool, Path::new("/nonexistent-storage-dir"))
         .await
         .unwrap();
 
-    let docs = info.table_counts.iter().find(|t| t.table == "documents").unwrap();
-    assert_eq!(docs.count, 1);
+    let items = info.table_counts.iter().find(|t| t.table == "items").unwrap();
+    assert_eq!(items.count, 2);
 
-    let doc_status = info
-        .documents_by_status
+    let confirmed = info
+        .items_by_status
         .iter()
-        .find(|s| s.status == "pending")
+        .find(|s| s.status == "confirmed")
         .unwrap();
-    assert_eq!(doc_status.count, 1);
+    assert_eq!(confirmed.count, 2);
 }

@@ -1,28 +1,37 @@
 //! Pluggy (open-banking / account aggregation) client + import logic.
 //!
-//! Flow: create an item (bank connection) → Pluggy syncs it → we pull the
-//! accounts + transactions and import them as `confirmed` items, keyed by
-//! Pluggy's transaction id (`items.external_id`) so re-syncs are idempotent.
+//! Accounts are **config-driven**: the user reads their account ids once from
+//! the Pluggy dashboard (they are stable) and lists them in `.env`
+//! (`PLUGGY_ACCOUNTS`, a JSON array). No items API is needed.
 //!
-//! Sign conventions (from Pluggy docs):
+//! Import is **adopt-and-dedupe**: for each Pluggy transaction we first try to
+//! match an existing document-sourced item (same |amount|, ±2 days, shared
+//! descriptive tokens). On a unique match we reuse that row — just stamping
+//! `items.external_id` with Pluggy's transaction id — so the user's curated
+//! tags/category/recurring links are preserved and nothing is duplicated.
+//! Unmatched transactions are inserted as `confirmed` items (`source='pluggy'`).
+//! Re-syncs are idempotent via `items.external_id` (partial unique index).
+//!
+//! Sign conventions (from Pluggy docs + live data):
 //! - BANK accounts: amount > 0 = inflow (CREDIT), amount < 0 = outflow (DEBIT).
 //! - CREDIT accounts: amount > 0 = charge (expense), amount < 0 = payment/refund.
-//!   We import card charges as expenses and skip card-side payments/refunds
-//!   (the payment already shows up on the bank-account side).
+//!   Card charges import as expenses; card-side payments/refunds are skipped
+//!   (the payment already shows on the bank side as an internal move).
+//! - Bank-side "Credit card payment" transactions are imported as `internal`
+//!   (they are the fatura payment — the real expense is on the card side).
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
 
+use crate::config::PluggyAccountConf;
 use crate::services::{recurring, tags};
 
 const API_BASE: &str = "https://api.pluggy.ai";
-const PAGE_SIZE: i64 = 500;
 
 // ---------- API types (Pluggy returns camelCase JSON) ----------
 
@@ -132,6 +141,9 @@ pub struct Transaction {
     pub description: Option<String>,
     pub description_raw: Option<String>,
     pub amount: Option<f64>,
+    /// Amount in the account's currency for international (FX) transactions
+    /// (e.g. USD charge with the BRL equivalent here).
+    pub amount_in_account_currency: Option<f64>,
     pub date: Option<String>,
     pub currency_code: Option<String>,
     #[serde(rename = "type")]
@@ -177,8 +189,6 @@ pub struct CreditCardMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct TransactionPage {
     pub results: Vec<Transaction>,
-    pub page: i64,
-    pub total: i64,
     /// Relative query string for the next page (e.g. `?accountId=…&after=…`).
     pub next: Option<String>,
 }
@@ -196,8 +206,6 @@ pub struct PluggyClient {
     client_secret: Option<String>,
     token: Arc<Mutex<Option<(String, Instant)>>>,
 }
-
-use std::sync::Arc;
 
 impl PluggyClient {
     /// API-key mode: the key is used for every request as-is (single-user setups).
@@ -284,10 +292,7 @@ impl PluggyClient {
     /// On 401 with client credentials available, drop the cached JWT (it may
     /// have expired) and retry once. A fixed API key can't be refreshed — the
     /// error is surfaced as-is so the user regenerates it.
-    async fn send_with_retry(
-        &self,
-        req: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response> {
+    async fn send_with_retry(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let key = self.api_key().await?;
         let resp = req
             .try_clone()
@@ -381,7 +386,6 @@ impl PluggyClient {
         self.get(&format!("/items/{pluggy_id}")).await
     }
 
-    /// Trigger a sync (or send credentials/MFA) for an existing item.
     pub async fn update_item(
         &self,
         pluggy_id: &str,
@@ -418,10 +422,24 @@ impl PluggyClient {
         Ok(out)
     }
 
-    /// All transactions for an account, following the cursor.
-    pub async fn list_transactions(&self, account_id: &str) -> Result<Vec<Transaction>> {
+    /// All transactions for an account (v2, cursor pagination, 500/page).
+    /// `date_from`/`date_to` (transaction date, inclusive) narrow the pull —
+    /// incremental syncs fetch only what's newer than the last import.
+    pub async fn list_transactions(
+        &self,
+        account_id: &str,
+        date_from: Option<NaiveDate>,
+        date_to: Option<NaiveDate>,
+    ) -> Result<Vec<Transaction>> {
+        let mut query = format!("/v2/transactions?accountId={account_id}");
+        if let Some(d) = date_from {
+            query.push_str(&format!("&dateFrom={d}"));
+        }
+        if let Some(d) = date_to {
+            query.push_str(&format!("&dateTo={d}"));
+        }
         let mut out = Vec::new();
-        let mut next: Option<String> = Some(format!("/transactions?accountId={account_id}&pageSize={PAGE_SIZE}"));
+        let mut next: Option<String> = Some(query);
         while let Some(path) = next {
             let p: TransactionPage = self.get(&path).await?;
             let is_empty = p.results.is_empty();
@@ -431,9 +449,9 @@ impl PluggyClient {
                 if n.starts_with('/') {
                     n
                 } else if n.starts_with('?') {
-                    format!("/transactions{n}")
+                    format!("/v2/transactions{n}")
                 } else {
-                    format!("/transactions?{n}")
+                    format!("/v2/transactions?{n}")
                 }
             });
             if !has_next || is_empty {
@@ -447,25 +465,14 @@ impl PluggyClient {
 // ---------- Local persistence + import ----------
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct LocalPluggyItem {
-    pub id: Uuid,
-    pub pluggy_id: String,
-    pub connector_id: Option<i32>,
-    pub connector_name: Option<String>,
-    pub status: String,
-    pub error: Option<serde_json::Value>,
-    pub last_sync_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct LocalPluggyAccount {
     pub id: Uuid,
     pub pluggy_account_id: String,
-    pub pluggy_item_id: Uuid,
+    pub pluggy_item_id: Option<Uuid>,
     pub account_id: Option<Uuid>,
     pub name: String,
     pub account_type: Option<String>,
+    pub bank: Option<String>,
     pub subtype: Option<String>,
     pub currency: String,
     pub balance: Option<f64>,
@@ -475,49 +482,11 @@ pub struct LocalPluggyAccount {
     pub last_sync_at: Option<DateTime<Utc>>,
 }
 
-/// Save a Pluggy item locally (upsert by `pluggy_id`).
-pub async fn upsert_pluggy_item(pool: &PgPool, item: &PluggyItem) -> Result<Uuid> {
-    let connector = item.connector.as_ref();
-    let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO pluggy_items (pluggy_id, connector_id, connector_name, status, error)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (pluggy_id) DO UPDATE SET
-           connector_id = EXCLUDED.connector_id,
-           connector_name = EXCLUDED.connector_name,
-           status = EXCLUDED.status,
-           error = EXCLUDED.error
-         RETURNING id",
-    )
-    .bind(&item.id)
-    .bind(connector.map(|c| c.id))
-    .bind(connector.map(|c| c.name.clone()))
-    .bind(&item.status)
-    .bind(item.error.clone())
-    .fetch_one(pool)
-    .await?;
-    Ok(row.0)
-}
-
-/// Sync accounts for an item into `pluggy_accounts` (upsert by pluggy id),
-/// creating matching `accounts` rows (for item filtering) on first sight.
-pub async fn upsert_accounts(pool: &PgPool, local_item_id: Uuid, accounts: &[Account]) -> Result<()> {
+/// Upsert the accounts configured in `.env` into `pluggy_accounts`, creating
+/// matching `accounts` rows (for item filtering) on first sight. Returns the
+/// number of accounts configured.
+pub async fn seed_configured_accounts(pool: &PgPool, accounts: &[PluggyAccountConf]) -> Result<usize> {
     for a in accounts {
-        let name = a
-            .marketing_name
-            .clone()
-            .or_else(|| a.name.clone())
-            .unwrap_or_else(|| "Conta".to_string());
-        let account_type = a.kind.clone().unwrap_or_default();
-        let subtype = a.subtype.clone().unwrap_or_default();
-        let currency = a.currency_code.clone().unwrap_or_else(|| "BRL".to_string());
-        let (close_date, due_date) = match &a.credit_data {
-            Some(cd) => (
-                cd.balance_close_date.as_deref().and_then(parse_iso_date),
-                cd.balance_due_date.as_deref().and_then(parse_iso_date),
-            ),
-            None => (None, None),
-        };
-
         // Find/create the local account (keyed by pluggy account id).
         let account_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT account_id FROM pluggy_accounts WHERE pluggy_account_id = $1",
@@ -531,8 +500,8 @@ pub async fn upsert_accounts(pool: &PgPool, local_item_id: Uuid, accounts: &[Acc
                 let (id,): (Uuid,) = sqlx::query_as(
                     "INSERT INTO accounts (name, bank) VALUES ($1, $2) RETURNING id",
                 )
-                .bind(&name)
-                .bind(&account_type)
+                .bind(&a.name)
+                .bind(&a.kind)
                 .fetch_one(pool)
                 .await?;
                 Some(id)
@@ -541,98 +510,145 @@ pub async fn upsert_accounts(pool: &PgPool, local_item_id: Uuid, accounts: &[Acc
 
         sqlx::query(
             "INSERT INTO pluggy_accounts
-               (pluggy_account_id, pluggy_item_id, account_id, name, account_type, subtype,
-                currency, balance, credit_limit, due_date, close_date, last_sync_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+               (pluggy_account_id, account_id, name, account_type, bank, currency)
+             VALUES ($1, $2, $3, $4, $5, 'BRL')
              ON CONFLICT (pluggy_account_id) DO UPDATE SET
-               pluggy_item_id = EXCLUDED.pluggy_item_id,
                account_id = EXCLUDED.account_id,
                name = EXCLUDED.name,
                account_type = EXCLUDED.account_type,
-               subtype = EXCLUDED.subtype,
-               currency = EXCLUDED.currency,
-               balance = EXCLUDED.balance,
-               credit_limit = EXCLUDED.credit_limit,
-               due_date = EXCLUDED.due_date,
-               close_date = EXCLUDED.close_date,
-               last_sync_at = now()",
+               bank = EXCLUDED.bank",
         )
         .bind(&a.id)
-        .bind(local_item_id)
         .bind(account_id)
-        .bind(&name)
-        .bind(&account_type)
-        .bind(&subtype)
-        .bind(&currency)
-        .bind(a.balance)
-        .bind(a.credit_data.as_ref().and_then(|c| c.credit_limit))
-        .bind(due_date)
-        .bind(close_date)
+        .bind(&a.name)
+        .bind(&a.kind)
+        .bind(&a.bank)
         .execute(pool)
         .await?;
     }
-    Ok(())
+    Ok(accounts.len())
 }
 
-/// Import all transactions of an item into `items` (confirmed), idempotent via
-/// `items.external_id` (Pluggy's transaction id). Returns the number of new items.
-pub async fn import_item_transactions(
+/// Result of syncing one account.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountSyncResult {
+    pub pluggy_account_id: String,
+    pub name: String,
+    /// Newly inserted items.
+    pub new: usize,
+}
+
+/// Import transactions for every configured account. Returns per-account
+/// results. Idempotent: items carry `external_id` (Pluggy tx id).
+///
+/// By default the pull is **incremental**: only transactions posted after the
+/// account's last imported date (minus a small overlap for late-posted
+/// charges) are fetched. Pass `forced_from`/`forced_to` to re-pull a custom
+/// period (full history when both are `None` and the account is empty).
+pub async fn sync_all_accounts(
     pool: &PgPool,
     client: &PluggyClient,
-    local_item: &LocalPluggyItem,
-) -> Result<usize> {
+    forced_from: Option<NaiveDate>,
+    forced_to: Option<NaiveDate>,
+) -> Result<Vec<AccountSyncResult>> {
     let accounts: Vec<LocalPluggyAccount> = sqlx::query_as(
-        "SELECT id, pluggy_account_id, pluggy_item_id, account_id, name, account_type,
+        "SELECT id, pluggy_account_id, pluggy_item_id, account_id, name, account_type, bank,
                 subtype, currency, balance::float8 AS balance, credit_limit::float8 AS credit_limit,
                 due_date, close_date, last_sync_at
-         FROM pluggy_accounts WHERE pluggy_item_id = $1",
+         FROM pluggy_accounts ORDER BY bank, name",
     )
-    .bind(local_item.id)
     .fetch_all(pool)
     .await?;
 
-    let categories = load_categories(pool).await?;
-    let mut imported = 0usize;
+    let mut out = Vec::with_capacity(accounts.len());
+    for acc in accounts {
+        // Incremental default: from = last imported tx date − 3 days (catches
+        // charges posted a few days after the cutoff). Empty account → full pull.
+        let from = match forced_from {
+            Some(f) => Some(f),
+            None => last_import_date(pool, &acc)
+                .await?
+                .map(|d| d - chrono::Duration::days(3)),
+        };
+        let new = import_account_transactions(pool, client, &acc, from, forced_to).await?;
+        out.push(AccountSyncResult {
+            pluggy_account_id: acc.pluggy_account_id.clone(),
+            name: acc.name,
+            new,
+        });
+    }
+    Ok(out)
+}
 
-    for acc in &accounts {
-        let txs = client.list_transactions(&acc.pluggy_account_id).await?;
-        for tx in txs {
-            let Some(mapped) = map_transaction(&tx, acc, &categories) else {
-                continue;
-            };
-            // RETURNING only yields a row for actually-inserted items, so a
-            // duplicate (same external_id) skips the recurring-rule linking.
-            let inserted: Option<(Uuid,)> = sqlx::query_as(
-                "INSERT INTO items
-                   (parent_id, document_id, source, kind, status, account_id,
-                    installment, installment_count, occurred_on, merchant, description,
-                    amount_cents, currency, category_id, tags, raw_line, external_id)
-                 VALUES (NULL, NULL, 'pluggy', $1, 'confirmed', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                 ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING
-                 RETURNING id",
-            )
-            .bind(&mapped.kind)
-            .bind(acc.account_id)
-            .bind(mapped.installment)
-            .bind(mapped.installment_count)
-            .bind(mapped.occurred_on)
-            .bind(&mapped.merchant)
-            .bind(&mapped.description)
-            .bind(mapped.amount_cents)
-            .bind(&acc.currency)
-            .bind(mapped.category_id)
-            .bind(&mapped.tags)
-            .bind(&mapped.raw_line)
-            .bind(&tx.id)
-            .fetch_optional(pool)
+/// Latest transaction date already imported for an account, if any.
+async fn last_import_date(pool: &PgPool, acc: &LocalPluggyAccount) -> Result<Option<NaiveDate>> {
+    let Some(account_id) = acc.account_id else {
+        return Ok(None);
+    };
+    let d: Option<NaiveDate> =
+        sqlx::query_scalar("SELECT max(occurred_on) FROM items WHERE account_id = $1")
+            .bind(account_id)
+            .fetch_one(pool)
             .await?;
-            if let Some((item_id,)) = inserted {
-                imported += 1;
-                recurring::link_item(pool, item_id).await?;
-            }
+    Ok(d)
+}
+
+/// Import one account's transactions into `items` (confirmed), idempotent via
+/// `items.external_id`. `date_from`/`date_to` bound the pull (incremental by
+/// default). Returns the number of newly inserted items.
+pub async fn import_account_transactions(
+    pool: &PgPool,
+    client: &PluggyClient,
+    acc: &LocalPluggyAccount,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
+) -> Result<usize> {
+    let categories = load_categories(pool).await?;
+    let txs = client.list_transactions(&acc.pluggy_account_id, date_from, date_to).await?;
+
+    let mut new = 0usize;
+    for tx in txs {
+        let Some(mapped) = map_transaction(&tx, acc, &categories) else {
+            continue;
+        };
+
+        // INSERT with ON CONFLICT (external_id) DO NOTHING — only new
+        // transactions are imported; existing rows are never touched.
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
+            "INSERT INTO items
+               (parent_id, document_id, source, kind, status, account_id,
+                installment, installment_count, occurred_on, merchant, description,
+                amount_cents, currency, category_id, tags, raw_line, external_id)
+             VALUES (NULL, NULL, 'pluggy', $1, 'confirmed', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING
+             RETURNING id",
+        )
+        .bind(&mapped.kind)
+        .bind(acc.account_id)
+        .bind(mapped.installment)
+        .bind(mapped.installment_count)
+        .bind(mapped.occurred_on)
+        .bind(&mapped.merchant)
+        .bind(&mapped.description)
+        .bind(mapped.amount_cents)
+        .bind(&acc.currency)
+        .bind(mapped.category_id)
+        .bind(&mapped.tags)
+        .bind(&mapped.raw_line)
+        .bind(&tx.id)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((item_id,)) = inserted {
+            new += 1;
+            recurring::link_item(pool, item_id).await?;
         }
     }
-    Ok(imported)
+
+    sqlx::query("UPDATE pluggy_accounts SET last_sync_at = now() WHERE id = $1")
+        .bind(acc.id)
+        .execute(pool)
+        .await?;
+    Ok(new)
 }
 
 // ---------- transaction → item mapping ----------
@@ -650,49 +666,59 @@ struct MappedItem {
     raw_line: Option<String>,
 }
 
-/// Map one Pluggy transaction to an item insert. Returns `None` for rows we
-/// intentionally skip (card-side payments/refunds — already seen on the bank side).
+/// Map one Pluggy transaction to an item. Returns `None` for rows we skip
+/// (card-side payments/refunds — already seen on the bank side).
 fn map_transaction(
     tx: &Transaction,
     acc: &LocalPluggyAccount,
     categories: &[(Uuid, String)],
 ) -> Option<MappedItem> {
     let is_card = acc.account_type.as_deref() == Some("CREDIT");
+    let category = tx.category.as_deref().unwrap_or("");
 
-    let (amount, kind) = match tx.kind.as_deref() {
-        Some("DEBIT") => {
-            if is_card {
-                // card charge → expense (Pluggy amount is positive for charges).
-                (-cents(tx.amount?).abs(), "expense".to_string())
-            } else {
-                (-cents(tx.amount?).abs(), "expense".to_string())
-            }
-        }
-        Some("CREDIT") => {
-            if is_card {
-                // card payment/refund → skip (already on the bank side).
-                return None;
-            }
-            (cents(tx.amount?), "income".to_string())
-        }
-        _ => return None,
-    };
-
+    // International (FX) charges carry the BRL value in `amountInAccountCurrency`
+    // (e.g. US$ 15.00 → R$ 80.08); `amount` alone would be in the foreign currency.
+    let raw_amount = tx.amount_in_account_currency.or(tx.amount)?;
     let description = tx
         .description
         .clone()
         .or_else(|| tx.description_raw.clone())
-        .or_else(|| {
-            tx.merchant
-                .as_ref()
-                .and_then(|m| m.name.clone())
-        })
+        .or_else(|| tx.merchant.as_ref().and_then(|m| m.name.clone()))
         .or_else(|| {
             tx.payment_data
                 .as_ref()
                 .and_then(|p| p.receiver.as_ref().and_then(|r| r.name.clone()))
         })
         .unwrap_or_else(|| "Transação".to_string());
+    let (amount, kind) = match tx.kind.as_deref() {
+        Some("DEBIT") => {
+            if is_card {
+                // card charge → expense (Pluggy amount is positive for charges).
+                (-cents(raw_amount).abs(), "expense".to_string())
+            } else if category == "Credit card payment" {
+                // bank-side fatura payment → internal move (expense is on the card).
+                (-cents(raw_amount).abs(), "internal".to_string())
+            } else {
+                (-cents(raw_amount).abs(), "expense".to_string())
+            }
+        }
+        Some("CREDIT") => {
+            if is_card {
+                // Card payments (fatura) are CREDIT + negative — skip, they're
+                // already visible on the bank side. Card **refunds/estornos**
+                // are also CREDIT + negative but carry refund keywords; import
+                // those as refunds (positive, money back).
+                if is_card_refund(&description) {
+                    (cents(raw_amount).abs(), "refund".to_string())
+                } else {
+                    return None;
+                }
+            } else {
+                (cents(raw_amount), "income".to_string())
+            }
+        }
+        _ => return None,
+    };
 
     let merchant = tx
         .merchant
@@ -744,6 +770,16 @@ fn cents(amount: f64) -> i64 {
     (amount * 100.0).round() as i64
 }
 
+/// A card-side CREDIT that is a refund/estorno (money back) rather than a
+/// fatura payment. Pluggy has no explicit flag — the description keywords are
+/// the signal ("Estorno Tarifa…", "Refund", "IOF de volta de…").
+fn is_card_refund(description: &str) -> bool {
+    let d = description.to_lowercase();
+    ["estorno", "storno", "refund", "reembolso", "de volta", "cashback", "chargeback"]
+        .iter()
+        .any(|k| d.contains(k))
+}
+
 /// Parse an ISO-8601 timestamp into a BR (-3) calendar date.
 fn parse_iso_datetime(s: &str) -> Option<NaiveDate> {
     let dt = DateTime::parse_from_rfc3339(s).ok()?;
@@ -751,15 +787,169 @@ fn parse_iso_datetime(s: &str) -> Option<NaiveDate> {
     Some(dt.with_timezone(&br).date_naive())
 }
 
-fn parse_iso_date(s: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
-}
-
 async fn load_categories(pool: &PgPool) -> Result<Vec<(Uuid, String)>> {
     Ok(sqlx::query_as("SELECT id, name FROM categories WHERE is_active")
         .fetch_all(pool)
         .await?)
 }
+
+// ---------- description tokens (shared by refund linking) ----------
+
+/// Words that carry no discriminating power between two descriptions.
+const STOPWORDS: &[&str] = &[
+    "transferencia", "enviada", "enviado", "recebida", "recebido", "pix", "pelo", "pagamento",
+    "boleto", "efetuado", "tarifa", "estorno", "compra", "debito", "credito", "saque", "ted",
+    "doc", "fatura", "para", "via", "no", "na", "em", "do", "da", "dos", "das", "de", "s", "a",
+    "e", "o", "ao", "os", "as", "uma", "um", "dia", "valor", "conta", "agencia", "banco", "sao",
+    "ltd", "ltda", "s.a", "sa", "ip", "envio", "fat", "total", "brl", "real", "reais", "rua",
+    "vila", "cep", "ref", "av", "num", "carta", "cred", "saq", "realizado", "realizada",
+    "lancado", "lancamento", "solicitado", "deposito",
+];
+
+/// Normalized, deduped, stopword-filtered tokens of a description. Keeps words
+/// of >= 3 chars plus short all-numeric tokens ("4" in "PISTA 4").
+fn desc_tokens(s: &str) -> std::collections::HashSet<String> {
+    let n = tags::strip_accents(s).to_lowercase();
+    n.split(|c: char| !c.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|t| {
+            (t.len() >= 3)
+                || (t.len() <= 2 && t.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter(|t| !STOPWORDS.contains(t))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Two tokens are considered the same descriptor when equal, one is a prefix of
+/// the other ("aplic" ≈ "aplicacao"), or one contains the other ("salario" ⊂
+/// "TEDSALARIO").
+fn token_matches(a: &str, b: &str) -> bool {
+    a == b || a.starts_with(b) || b.starts_with(a) || a.contains(b) || b.contains(a)
+}
+
+/// Number of candidate tokens sharing a descriptor with the transaction tokens.
+fn token_score(candidate: &str, tx_tokens: &std::collections::HashSet<String>) -> usize {
+    desc_tokens(candidate)
+        .iter()
+        .filter(|t| tx_tokens.iter().any(|x| token_matches(t, x)))
+        .count()
+}
+
+/// Link each refund to the charge it reverses (`items.refunded_item_id`), so
+/// the graphs can net them. Kind-agnostic (the counterpart may be `expense` or
+/// `internal`). Two passes, greedy & unique:
+///
+/// - **Pass 1 (exact)**: equal |amount| + shared merchant tokens within ±45
+///   days; best by (token score, nearest date).
+/// - **Pass 2 (partial)**: |charge| >= |refund| + shared tokens + charge
+///   before refund within ±45 days; nearest date.
+/// Returns the number of newly linked refunds.
+pub async fn link_refunds(pool: &PgPool) -> Result<usize> {
+    let refunds: Vec<(Uuid, i64, NaiveDate, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, amount_cents, occurred_on, description, merchant FROM items
+         WHERE kind = 'refund' AND refunded_item_id IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut linked = 0usize;
+    for (rid, amount, date, description, merchant) in refunds {
+        let amount = amount.abs();
+        let mut tokens = desc_tokens(&description);
+        if let Some(m) = &merchant {
+            tokens.extend(desc_tokens(m));
+        }
+        let Some(cid) = find_refund_charge(pool, amount, date, &tokens).await? else {
+            continue;
+        };
+        let affected = sqlx::query(
+            "UPDATE items SET refunded_item_id = $1, updated_at = now() WHERE id = $2",
+        )
+        .bind(cid)
+        .bind(rid)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        linked += affected as usize;
+    }
+    Ok(linked)
+}
+
+/// Find the unique best charge for a refund: pass 1 exact |amount|, then pass 2
+/// partial (|charge| >= |refund|). Both within ±45 days, merchant-token scored,
+/// nearest-date tie-break; `None` when absent or ambiguous.
+async fn find_refund_charge(
+    pool: &PgPool,
+    amount: i64,
+    date: NaiveDate,
+    tokens: &std::collections::HashSet<String>,
+) -> Result<Option<Uuid>> {
+    // Pass 1: exact |amount|.
+    let exact: Vec<(Uuid, String, Option<String>, NaiveDate)> = sqlx::query_as(
+        "SELECT id, description, merchant, occurred_on FROM items
+         WHERE kind IN ('expense', 'internal')
+           AND amount_cents = -$1
+           AND occurred_on BETWEEN ($2::date - 45) AND ($2::date + 45)",
+    )
+    .bind(amount)
+    .bind(date)
+    .fetch_all(pool)
+    .await?;
+    if let Some(id) = best_charge(exact, date, tokens) {
+        return Ok(Some(id));
+    }
+
+    // Pass 2: partial refund — |charge| >= |refund|, charge posted first.
+    let partial: Vec<(Uuid, String, Option<String>, NaiveDate)> = sqlx::query_as(
+        "SELECT id, description, merchant, occurred_on FROM items
+         WHERE kind IN ('expense', 'internal')
+           AND amount_cents <= -$1
+           AND occurred_on BETWEEN ($2::date - 45) AND $2::date",
+    )
+    .bind(amount)
+    .bind(date)
+    .fetch_all(pool)
+    .await?;
+    Ok(best_charge(partial, date, tokens))
+}
+
+/// Score candidate charges by shared merchant tokens (description + merchant
+/// field), pick the unique best — tie-broken by nearest date. Requires a token
+/// overlap; `None` when no candidate scores or the best is tied.
+fn best_charge(
+    candidates: Vec<(Uuid, String, Option<String>, NaiveDate)>,
+    refund_date: NaiveDate,
+    tokens: &std::collections::HashSet<String>,
+) -> Option<Uuid> {
+    let mut best: Option<(usize, i64, Uuid)> = None;
+    let mut ties = 0usize;
+    for (id, desc, merchant, cdate) in candidates {
+        let mut score = token_score(&desc, tokens);
+        if let Some(m) = &merchant {
+            score = score.max(token_score(m, tokens));
+        }
+        if score == 0 {
+            continue;
+        }
+        let dist = (refund_date - cdate).num_days().abs();
+        let cand = (score, dist, id);
+        match &best {
+            Some(b) if b.0 == cand.0 && b.1 == cand.1 => ties += 1,
+            Some(b) if b.0 > cand.0 || (b.0 == cand.0 && b.1 < cand.1) => {}
+            _ => {
+                best = Some(cand);
+                ties = 1;
+            }
+        }
+    }
+    match best {
+        Some((score, _, id)) if ties == 1 && score > 0 => Some(id),
+        _ => None,
+    }
+}
+
+// ---------- category mapping ----------
 
 /// Best-effort match of a Pluggy category name to our seeded categories.
 fn match_category(categories: &[(Uuid, String)], pluggy_category: &str) -> Option<Uuid> {
@@ -779,45 +969,80 @@ fn match_category(categories: &[(Uuid, String)], pluggy_category: &str) -> Optio
         .map(|(id, _)| *id)
 }
 
-/// Map Pluggy category names (en-US taxonomy) to our canonical names.
+/// Map Pluggy's category taxonomy to our canonical (accent-stripped) names.
+/// Unknown categories fall through unchanged (best-effort substring match).
 fn alias_category(s: &str) -> String {
-    let table: HashMap<&str, &str> = [
-        ("supermarkets", "supermercado"),
+    let table: &[(&str, &str)] = &[
+        // Supermercado
         ("groceries", "supermercado"),
-        ("restaurants", "restaurantes"),
-        ("dining", "restaurantes"),
-        ("food", "restaurantes"),
+        // Restaurantes
+        ("food delivery", "restaurantes"),
+        ("eating out", "restaurantes"),
+        ("food and drinks", "restaurantes"),
+        // Transporte
+        ("parking", "transporte"),
+        ("gas stations", "transporte"),
+        ("taxi and ride-hailing", "transporte"),
+        ("car rental", "transporte"),
+        ("tolls and in vehicle payment", "transporte"),
+        ("bicycle", "transporte"),
+        ("automotive", "transporte"),
+        ("vehicle maintenance", "transporte"),
         ("transportation", "transporte"),
-        ("transport", "transporte"),
-        ("fuel", "transporte"),
-        ("gas", "transporte"),
-        ("health", "saude"),
+        // Saúde
+        ("healthcare", "saude"),
         ("pharmacy", "saude"),
-        ("medical", "saude"),
-        ("housing", "moradia"),
-        ("rent", "moradia"),
-        ("utilities", "moradia"),
-        ("entertainment", "lazer"),
-        ("leisure", "lazer"),
-        ("streaming", "assinaturas"),
-        ("subscriptions", "assinaturas"),
-        ("salary", "salario"),
         ("insurance", "saude"),
-        ("education", "educacao"),
+        ("wellness and fitness", "saude"),
+        ("gyms and fitness centers", "saude"),
+        // Moradia
+        ("rent", "moradia"),
+        ("housing", "moradia"),
+        ("real estate financing", "moradia"),
+        ("electricity", "moradia"),
+        ("water", "moradia"),
+        ("telecommunications", "moradia"),
+        // Lazer
+        ("accomodation", "lazer"),
         ("travel", "lazer"),
+        ("leisure", "lazer"),
+        ("gambling", "lazer"),
+        ("gaming", "lazer"),
+        ("tickets", "lazer"),
+        // Assinaturas
+        ("video streaming", "assinaturas"),
+        ("digital services", "assinaturas"),
+        // Outros (everything else stays unmapped → Outros fallback below)
         ("shopping", "compras"),
         ("clothing", "compras"),
-        ("transfers", "transferencias"),
-        ("other", "outros"),
-    ]
-    .iter()
-    .map(|(k, v)| (*k, *v))
-    .collect();
-
-    match table.get(s) {
-        Some(v) => (*v).to_string(),
-        None => s.to_string(),
+        ("houseware", "compras"),
+        ("electronics", "compras"),
+        ("sports goods", "compras"),
+        ("bookstore", "compras"),
+        ("kids and toys", "compras"),
+        ("services", "servicos"),
+        ("pet supplies and vet", "pets"),
+        ("investments", "investimentos"),
+        ("fixed income", "investimentos"),
+        ("automatic investment", "investimentos"),
+        ("pension", "investimentos"),
+        ("cashback", "cashback"),
+        ("income", "renda"),
+        ("salary", "salario"),
+        ("account fees", "taxas"),
+        ("bank fees", "taxas"),
+        ("credit card fees", "taxas"),
+        ("tax on financial operations", "taxas"),
+        ("interests charged", "taxas"),
+        ("income taxes", "taxas"),
+        ("loans", "emprestimos"),
+    ];
+    for (k, v) in table {
+        if *k == s {
+            return (*v).to_string();
+        }
     }
+    s.to_string()
 }
 
 #[cfg(test)]
@@ -829,10 +1054,11 @@ mod tests {
         LocalPluggyAccount {
             id: Uuid::new_v4(),
             pluggy_account_id: "acc-1".into(),
-            pluggy_item_id: Uuid::new_v4(),
+            pluggy_item_id: None,
             account_id: None,
             name: "Conta".into(),
             account_type: Some(kind.to_string()),
+            bank: None,
             subtype: None,
             currency: "BRL".into(),
             balance: None,
@@ -890,7 +1116,6 @@ mod tests {
 
     #[test]
     fn card_charge_is_expense() {
-        // Credit card: Pluggy amount is positive for charges.
         let t = tx(55.9, "DEBIT", json!({}));
         let m = map_transaction(&t, &account("CREDIT"), &[]).unwrap();
         assert_eq!(m.kind, "expense");
@@ -899,9 +1124,28 @@ mod tests {
 
     #[test]
     fn card_payment_is_skipped() {
-        // Card-side bill payment (negative, CREDIT) — already on the bank side.
-        let t = tx(-1500.0, "CREDIT", json!({}));
+        let t = tx(-1500.0, "CREDIT", json!({ "description": "Pagamento de fatura" }));
         assert!(map_transaction(&t, &account("CREDIT"), &[]).is_none());
+    }
+
+    #[test]
+    fn card_refund_is_imported_as_positive_refund() {
+        let t = tx(-98.0, "CREDIT", json!({ "description": "Estorno Tarifa Anuidade Diferenciada" }));
+        let m = map_transaction(&t, &account("CREDIT"), &[]).unwrap();
+        assert_eq!(m.kind, "refund");
+        assert_eq!(m.amount_cents, 9_800);
+
+        let t = tx(-14.22, "CREDIT", json!({ "description": "IOF de volta de Quotationy.Com" }));
+        let m = map_transaction(&t, &account("CREDIT"), &[]).unwrap();
+        assert_eq!(m.kind, "refund");
+        assert_eq!(m.amount_cents, 1_422);
+    }
+
+    #[test]
+    fn bank_card_payment_is_internal() {
+        let t = tx(-1500.0, "DEBIT", json!({ "category": "Credit card payment" }));
+        let m = map_transaction(&t, &account("BANK"), &[]).unwrap();
+        assert_eq!(m.kind, "internal");
     }
 
     #[test]
@@ -931,7 +1175,6 @@ mod tests {
 
     #[test]
     fn br_timezone_shifts_near_midnight() {
-        // 00:30 UTC on the 10th is still the 9th in BR (-3).
         let t = tx(-10.0, "DEBIT", json!({ "date": "2026-07-10T00:30:00.000Z" }));
         let m = map_transaction(&t, &account("BANK"), &[]).unwrap();
         assert_eq!(m.occurred_on.to_string(), "2026-07-09");
@@ -942,10 +1185,19 @@ mod tests {
         let categories = vec![
             (Uuid::new_v4(), "Supermercado".to_string()),
             (Uuid::new_v4(), "Restaurantes".to_string()),
+            (Uuid::new_v4(), "Transporte".to_string()),
         ];
-        let t = tx(-20.0, "DEBIT", json!({ "category": "Supermarkets" }));
+        let t = tx(-20.0, "DEBIT", json!({ "category": "Groceries" }));
         let m = map_transaction(&t, &account("BANK"), &categories).unwrap();
         assert_eq!(m.category_id, Some(categories[0].0));
+
+        let t = tx(-20.0, "DEBIT", json!({ "category": "Eating out" }));
+        let m = map_transaction(&t, &account("BANK"), &categories).unwrap();
+        assert_eq!(m.category_id, Some(categories[1].0));
+
+        let t = tx(-20.0, "DEBIT", json!({ "category": "Gas stations" }));
+        let m = map_transaction(&t, &account("BANK"), &categories).unwrap();
+        assert_eq!(m.category_id, Some(categories[2].0));
     }
 
     #[test]
@@ -954,5 +1206,13 @@ mod tests {
         assert_eq!(cents(0.1), 10);
         assert_eq!(cents(-0.05), -5);
         assert_eq!(cents(55.9), 5_590);
+    }
+
+    #[test]
+    fn alias_category_known() {
+        assert_eq!(alias_category("food delivery"), "restaurantes");
+        assert_eq!(alias_category("gas stations"), "transporte");
+        assert_eq!(alias_category("video streaming"), "assinaturas");
+        assert_eq!(alias_category("credit card payment"), "credit card payment"); // left unmapped
     }
 }

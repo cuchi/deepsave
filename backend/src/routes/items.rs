@@ -14,7 +14,17 @@ use crate::AppState;
 pub(crate) const ITEM_COLS: &str = "id, parent_id, document_id, source, kind, status, account_id, \
      transfer_group_id, installment, installment_count, recurring_id, occurred_on, posted_on, \
      merchant, description, amount_cents, currency, category_id, suggested_category, tags, raw_line, \
-     match_confidence, created_at, updated_at";
+     match_confidence, created_at, updated_at, \
+     COALESCE(\
+       (SELECT s.bank FROM documents d JOIN sources s ON s.id = d.source_id WHERE d.id = items.document_id),\
+       (SELECT pa.bank FROM pluggy_accounts pa WHERE pa.account_id = items.account_id)\
+     ) AS bank, \
+     COALESCE(\
+       (SELECT s.name FROM documents d JOIN sources s ON s.id = d.source_id WHERE d.id = items.document_id),\
+       (SELECT pa.name FROM pluggy_accounts pa WHERE pa.account_id = items.account_id)\
+     ) AS source_label, \
+     external_id, \
+     refunded_item_id";
 
 /// Kinds a bulk edit may assign (must match what the app/parsers produce).
 const BULK_KINDS: [&str; 4] = ["expense", "income", "refund", "internal"];
@@ -100,7 +110,10 @@ const ITEM_FILTERS: &str = "
     AND ($8::text IS NULL OR EXISTS (
           SELECT 1 FROM documents d
           JOIN sources s ON s.id = d.source_id
-          WHERE d.id = items.document_id AND s.bank = $8))
+          WHERE d.id = items.document_id AND s.bank = $8)
+      OR EXISTS (
+          SELECT 1 FROM pluggy_accounts pa
+          WHERE pa.account_id = items.account_id AND pa.bank = $8))
     AND ($9::text IS NULL
          OR $9 = 'all'
          OR ($9 = 'first_only' AND NOT (COALESCE(installment_count, 0) > 1 AND COALESCE(installment, 0) > 1))
@@ -123,7 +136,7 @@ pub(crate) fn split_filters(s: &Option<String>) -> Vec<String> {
 }
 
 /// Sentinel value meaning "no category" / "no tags" in the filter params.
-pub(crate) const NO_FILTER: &str = "__none";
+/// (Used inside the static `ITEM_FILTERS` SQL as the `'__none'` literal.)
 
 /// When the installments filter is 'first_only', the first parcel stands in for
 /// the whole purchase: use the full series price (parcel × count) instead of
@@ -135,6 +148,18 @@ const AMOUNT_ADJ: &str = "
 
 /// Core list query, kept separate from the handler so integration tests can
 /// drive it without an `AppState` (mirrors `bulk_update_items`).
+/// `GET /api/banks` — distinct bank slugs (legacy document sources + Pluggy).
+pub async fn banks(State(state): State<AppState>) -> Result<Json<Vec<String>>, AppError> {
+    let banks: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT bank FROM sources WHERE bank IS NOT NULL
+         UNION SELECT DISTINCT bank FROM pluggy_accounts WHERE bank IS NOT NULL
+         ORDER BY 1",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(banks))
+}
+
 pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppError> {
     let (start, end) = month_range(q.month.as_deref())?;
     let category_ids = split_filters(&q.category_ids);
@@ -143,7 +168,17 @@ pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppEr
         "SELECT id, parent_id, document_id, source, kind, status, account_id, transfer_group_id,
                 installment, installment_count, recurring_id, occurred_on, posted_on, merchant,
                 description, {AMOUNT_ADJ} AS amount_cents, currency, category_id,
-                suggested_category, tags, raw_line, match_confidence, created_at, updated_at
+                suggested_category, tags, raw_line, match_confidence, created_at, updated_at,
+                COALESCE(
+                  (SELECT s.bank FROM documents d JOIN sources s ON s.id = d.source_id WHERE d.id = items.document_id),
+                  (SELECT pa.bank FROM pluggy_accounts pa WHERE pa.account_id = items.account_id)
+                ) AS bank,
+                COALESCE(
+                  (SELECT s.name FROM documents d JOIN sources s ON s.id = d.source_id WHERE d.id = items.document_id),
+                  (SELECT pa.name FROM pluggy_accounts pa WHERE pa.account_id = items.account_id)
+                ) AS source_label,
+                external_id,
+                refunded_item_id
          FROM items
          WHERE {ITEM_FILTERS}
          ORDER BY
@@ -444,12 +479,12 @@ pub async fn confirm(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let row: Option<(Option<Uuid>, Option<String>, Option<Uuid>, Vec<String>)> =
-        sqlx::query_as("SELECT document_id, merchant, category_id, tags FROM items WHERE id = $1")
+    let row: Option<(Option<String>, Option<Uuid>, Vec<String>)> =
+        sqlx::query_as("SELECT merchant, category_id, tags FROM items WHERE id = $1")
             .bind(id)
             .fetch_optional(&state.pool)
             .await?;
-    let Some((document_id, merchant, category_id, item_tags)) = row else {
+    let Some((merchant, category_id, item_tags)) = row else {
         return Err(AppError::not_found("item not found"));
     };
 
@@ -464,9 +499,6 @@ pub async fn confirm(
     // Strengthen the categorization memory on confirmation (tags accumulate).
     if let Some(m) = &merchant {
         memory::record_confirmation(&state.pool, m, category_id, &item_tags).await?;
-    }
-    if let Some(document_id) = document_id {
-        finalize_document_if_done(&state.pool, document_id).await?;
     }
 
     Ok(Json(json!({ "ok": true })))
@@ -651,38 +683,14 @@ pub async fn accept_suggestion(
 }
 
 async fn set_item_status(state: &AppState, id: Uuid, status: &str) -> Result<(), AppError> {
-    let row: Option<(Option<Uuid>,)> = sqlx::query_as("SELECT document_id FROM items WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
-    let Some((document_id,)) = row else {
-        return Err(AppError::not_found("item not found"));
-    };
-
-    sqlx::query("UPDATE items SET status = $1, updated_at = now() WHERE id = $2")
+    let affected = sqlx::query("UPDATE items SET status = $1, updated_at = now() WHERE id = $2")
         .bind(status)
         .bind(id)
         .execute(&state.pool)
-        .await?;
-
-    if let Some(document_id) = document_id {
-        finalize_document_if_done(&state.pool, document_id).await?;
-    }
-    Ok(())
-}
-
-async fn finalize_document_if_done(pool: &PgPool, document_id: Uuid) -> Result<(), AppError> {
-    let pending: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM items WHERE document_id = $1 AND status = 'pending_review'",
-    )
-    .bind(document_id)
-    .fetch_one(pool)
-    .await?;
-    if pending == 0 {
-        sqlx::query("UPDATE documents SET status = 'processed' WHERE id = $1")
-            .bind(document_id)
-            .execute(pool)
-            .await?;
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        return Err(AppError::not_found("item not found"));
     }
     Ok(())
 }
