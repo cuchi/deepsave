@@ -32,7 +32,6 @@ async fn system_info_reports_sizes_and_table_counts(pool: PgPool) {
         "documents",
         "items",
         "matches",
-        "merchant_memory",
         "recurring_aliases",
         "recurring_rules",
         "sources",

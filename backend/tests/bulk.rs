@@ -67,7 +67,6 @@ async fn kind_only_update_keeps_other_fields(pool: PgPool) {
             category_id: None,
             tags: None,
             tags_mode: None,
-            update_memory: false,
         },
     )
     .await;
@@ -94,7 +93,6 @@ async fn category_set_and_clear(pool: PgPool) {
             category_id: Some(Some(cat)),
             tags: None,
             tags_mode: None,
-            update_memory: false,
         },
     )
     .await;
@@ -110,7 +108,6 @@ async fn category_set_and_clear(pool: PgPool) {
             category_id: Some(None),
             tags: None,
             tags_mode: None,
-            update_memory: false,
         },
     )
     .await;
@@ -132,7 +129,6 @@ async fn category_omitted_keeps_value(pool: PgPool) {
             category_id: None,
             tags: None,
             tags_mode: None,
-            update_memory: false,
         },
     )
     .await
@@ -157,7 +153,6 @@ async fn tags_replace_add_remove(pool: PgPool) {
             category_id: None,
             tags: Some(vec![" Mercado ".into(), "CAFÉ".into()]),
             tags_mode: Some(TagsMode::Add),
-            update_memory: false,
         },
     )
     .await;
@@ -173,7 +168,6 @@ async fn tags_replace_add_remove(pool: PgPool) {
             category_id: None,
             tags: Some(vec!["casa".into()]),
             tags_mode: Some(TagsMode::Replace),
-            update_memory: false,
         },
     )
     .await
@@ -190,7 +184,6 @@ async fn tags_replace_add_remove(pool: PgPool) {
             category_id: None,
             tags: Some(vec!["saude".into()]),
             tags_mode: Some(TagsMode::Remove),
-            update_memory: false,
         },
     )
     .await
@@ -212,7 +205,6 @@ async fn unknown_ids_are_ignored(pool: PgPool) {
             category_id: None,
             tags: None,
             tags_mode: None,
-            update_memory: false,
         },
     )
     .await;
@@ -231,7 +223,6 @@ async fn validation_errors(pool: PgPool) {
             category_id: None,
             tags: None,
             tags_mode: None,
-            update_memory: false,
         },
     )
     .await;
@@ -248,7 +239,6 @@ async fn validation_errors(pool: PgPool) {
             category_id: None,
             tags: None,
             tags_mode: None,
-            update_memory: false,
         },
     )
     .await;
@@ -271,87 +261,10 @@ async fn duplicate_ids_dedupe(pool: PgPool) {
             category_id: None,
             tags: None,
             tags_mode: None,
-            update_memory: false,
         },
     )
     .await;
     assert_eq!(updated_count(res).await, 1);
 }
 
-async fn memory_count(pool: &PgPool) -> i64 {
-    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM merchant_memory")
-        .fetch_one(pool)
-        .await
-        .unwrap()
-}
 
-#[sqlx::test]
-async fn update_memory_is_opt_in(pool: PgPool) {
-    common::migrate(&pool).await;
-    let cat = insert_category(&pool, "Mercado").await;
-
-    // Two items, same merchant (normalized: accents stripped, lowercased).
-    let a = insert_item(&pool, "Padaria", "expense", None, &[]).await;
-    let b = insert_item(&pool, "Padaria", "expense", None, &[]).await;
-    sqlx::query("UPDATE items SET merchant = 'Pão Quente' WHERE id = ANY($1)")
-        .bind(vec![a, b])
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    // update_memory = false → no memory rows.
-    bulk_update_items(
-        &pool,
-        BulkItemUpdate {
-            ids: vec![a],
-            kind: None,
-            category_id: Some(Some(cat)),
-            tags: None,
-            tags_mode: None,
-            update_memory: false,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(memory_count(&pool).await, 0);
-
-    // update_memory = true → one row per distinct merchant (both items share one).
-    bulk_update_items(
-        &pool,
-        BulkItemUpdate {
-            ids: vec![a, b],
-            kind: None,
-            category_id: Some(Some(cat)),
-            tags: None,
-            tags_mode: None,
-            update_memory: true,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(memory_count(&pool).await, 1);
-
-    let (merchant, category_id): (String, Option<Uuid>) =
-        sqlx::query_as("SELECT merchant, category_id FROM merchant_memory")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(merchant, "pao quente");
-    assert_eq!(category_id, Some(cat));
-
-    // update_memory with kind-only change → no memory rows.
-    bulk_update_items(
-        &pool,
-        BulkItemUpdate {
-            ids: vec![a],
-            kind: Some("income".into()),
-            category_id: None,
-            tags: None,
-            tags_mode: None,
-            update_memory: true,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(memory_count(&pool).await, 1);
-}

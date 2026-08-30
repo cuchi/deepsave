@@ -151,6 +151,8 @@ pub struct Transaction {
     pub status: Option<String>, // POSTED | PENDING
     pub category: Option<String>,
     pub category_id: Option<String>,
+    /// Open Finance movement type (PIX, BOLETO, PORTABILIDADE_SALARIO, …).
+    pub operation_type: Option<String>,
     pub merchant: Option<Merchant>,
     pub payment_data: Option<PaymentData>,
     pub credit_card_metadata: Option<CreditCardMetadata>,
@@ -183,6 +185,9 @@ pub struct CreditCardMetadata {
     pub total_installments: Option<i64>,
     pub total_amount: Option<f64>,
     pub bill_id: Option<String>,
+    /// Merchant Category Code — a strong category signal. (Pluggy sends `payeeMCC`.)
+    #[serde(rename = "payeeMCC")]
+    pub payee_mcc: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -612,16 +617,23 @@ pub async fn import_account_transactions(
             continue;
         };
 
-        // INSERT with ON CONFLICT (external_id) DO NOTHING — only new
-        // transactions are imported; existing rows are never touched.
-        let inserted: Option<(Uuid,)> = sqlx::query_as(
+        // INSERT with ON CONFLICT (external_id) — only new transactions count
+        // as new; existing rows just refresh the enrichment metadata (stable
+        // Pluggy fields, never user data).
+        let inserted: Option<(Uuid, bool)> = sqlx::query_as(
             "INSERT INTO items
                (parent_id, document_id, source, kind, status, account_id,
                 installment, installment_count, occurred_on, merchant, description,
-                amount_cents, currency, category_id, tags, raw_line, external_id)
-             VALUES (NULL, NULL, 'pluggy', $1, 'confirmed', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-             ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING
-             RETURNING id",
+                amount_cents, currency, category_id, tags, raw_line, external_id,
+                pluggy_category, mcc, operation_type, payment_method)
+             VALUES (NULL, NULL, 'pluggy', $1, 'confirmed', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                     $14, $15, $16, $17)
+             ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO UPDATE SET
+               pluggy_category = EXCLUDED.pluggy_category,
+               mcc = EXCLUDED.mcc,
+               operation_type = EXCLUDED.operation_type,
+               payment_method = EXCLUDED.payment_method
+             RETURNING id, (xmax = 0) AS inserted",
         )
         .bind(&mapped.kind)
         .bind(acc.account_id)
@@ -636,11 +648,17 @@ pub async fn import_account_transactions(
         .bind(&mapped.tags)
         .bind(&mapped.raw_line)
         .bind(&tx.id)
+        .bind(&mapped.pluggy_category)
+        .bind(mapped.mcc)
+        .bind(&mapped.operation_type)
+        .bind(&mapped.payment_method)
         .fetch_optional(pool)
         .await?;
-        if let Some((item_id,)) = inserted {
-            new += 1;
-            recurring::link_item(pool, item_id).await?;
+        if let Some((item_id, is_new)) = inserted {
+            if is_new {
+                new += 1;
+                recurring::link_item(pool, item_id).await?;
+            }
         }
     }
 
@@ -664,6 +682,10 @@ struct MappedItem {
     category_id: Option<Uuid>,
     tags: Vec<String>,
     raw_line: Option<String>,
+    pluggy_category: Option<String>,
+    mcc: Option<i32>,
+    operation_type: Option<String>,
+    payment_method: Option<String>,
 }
 
 /// Map one Pluggy transaction to an item. Returns `None` for rows we skip
@@ -763,6 +785,13 @@ fn map_transaction(
             .category
             .as_ref()
             .map(|c| format!("pluggy category: {c}")),
+        pluggy_category: tx.category.clone(),
+        mcc: tx.credit_card_metadata.as_ref().and_then(|c| c.payee_mcc.map(|m| m as i32)),
+        operation_type: tx.operation_type.clone(),
+        payment_method: tx
+            .payment_data
+            .as_ref()
+            .and_then(|p| p.payment_method.clone()),
     })
 }
 

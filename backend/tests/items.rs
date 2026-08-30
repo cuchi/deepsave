@@ -186,25 +186,6 @@ async fn date_range_filters_list_and_summary(pool: PgPool) {
     assert_eq!(s.count, 3);
 }
 
-#[test]
-fn item_input_update_memory_defaults_to_on() {
-    use deepsave_backend::models::ItemInput;
-
-    // Omitted → feeds memory (a single edit is a correction).
-    let input: ItemInput = serde_json::from_str(
-        r#"{"occurred_on": "2026-01-01", "description": "x", "amount_cents": -100}"#,
-    )
-    .unwrap();
-    assert!(input.update_memory);
-
-    // Explicit opt-out.
-    let input: ItemInput = serde_json::from_str(
-        r#"{"occurred_on": "2026-01-01", "description": "x", "amount_cents": -100, "update_memory": false}"#,
-    )
-    .unwrap();
-    assert!(!input.update_memory);
-}
-
 #[sqlx::test]
 async fn multi_category_and_multi_tag_filters(pool: PgPool) {
     common::migrate(&pool).await;
@@ -353,4 +334,47 @@ async fn first_only_shows_full_price_in_list_and_summary(pool: PgPool) {
     let s = summary(&pool, &q).await.unwrap();
     assert_eq!(s.count, 2);
     assert_eq!(s.total_cents, -15050);
+}
+
+#[sqlx::test]
+async fn item_edit_writes_to_change_log(pool: PgPool) {
+    common::migrate(&pool).await;
+    let (item_id,): (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, tags)
+         VALUES ('manual', 'expense', 'confirmed', '2026-07-01', 'Teste', -1000, '{delivery}')
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // No-op log skip: same category/tags → nothing written.
+    deepsave_backend::services::change_log::log_item_change(
+        &pool, item_id, None, None, &["delivery".to_string()], &["delivery".to_string()], "item_edit",
+    )
+    .await
+    .unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM change_log")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+
+    // Real change → logged with before/after.
+    deepsave_backend::services::change_log::log_item_change(
+        &pool, item_id, None, None, &["delivery".to_string()], &["pessoal".to_string()], "item_edit",
+    )
+    .await
+    .unwrap();
+    let row: (String, Vec<String>, Vec<String>, String, chrono::NaiveDate) = sqlx::query_as(
+        "SELECT merchant_key, tags_before, tags_after, source, tx_date FROM change_log",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, "teste"); // merchant_key = normalized description
+    assert_eq!(row.1, vec!["delivery"]);
+    assert_eq!(row.2, vec!["pessoal"]);
+    assert_eq!(row.3, "item_edit");
+    assert_eq!(row.4.to_string(), "2026-07-01"); // transaction date snapshot
 }

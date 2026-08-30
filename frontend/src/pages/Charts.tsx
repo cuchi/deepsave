@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   banksApi,
   categoriesApi,
@@ -12,9 +12,16 @@ import {
   type TagTotal,
   type TrendPoint,
 } from '../api/client'
-import { currentMonth, fmtCents, lastCompleteMonthRange } from '../lib/format'
+import { currentMonth, fmtCents } from '../lib/format'
 import ItemFilters, { useFiltersUrl, type ItemFiltersValue } from '../components/ItemFilters'
 import EChart, { type EChartsCoreOption } from '../components/EChart'
+
+const fmtUpdatedAt = (iso?: string) => {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
 
 const PIE_COLORS = [
   '#34d399', '#60a5fa', '#f472b6', '#f87171', '#fbbf24', '#a78bfa',
@@ -410,17 +417,34 @@ export default function Charts() {
   const location = useLocation()
   const [graphsOpen, setGraphsOpen] = useState(true)
   const { filters, setFilters } = useFiltersUrl()
+  const qc = useQueryClient()
 
-  // Pre-fill the last complete month ONLY when landing on a clean URL (no
-  // params at all). If the user clears the dates afterwards, the URL loses them
-  // and the charts fall back to all history — clearing must actually clear.
-  useEffect(() => {
-    if (location.search === '') {
-      const { from, to } = lastCompleteMonthRange()
-      setFilters({ ...filters, dateFrom: from, dateTo: to }, { replace: true })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // The digest only exists for exactly one full calendar month: the filter
+  // range must start on the 1st and end on the last day of the same month.
+  const isFullMonth = (from?: string, to?: string): boolean => {
+    if (!from || !to) return false
+    const ym = from.slice(0, 7)
+    if (ym !== to.slice(0, 7) || from !== `${ym}-01`) return false
+    const last = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate()
+    return to === `${ym}-${String(last).padStart(2, '0')}`
+  }
+  const digestMonth = isFullMonth(filters.dateFrom, filters.dateTo) ? filters.dateFrom.slice(0, 7) : null
+
+  // Read the saved digest (no AI call).
+  const { data: digest, isFetching: digestLoading } = useQuery({
+    queryKey: ['digest', digestMonth],
+    queryFn: () => (digestMonth ? dashboardApi.digestGet(digestMonth) : Promise.resolve(null)),
+    enabled: !!digestMonth,
+  })
+
+  const generateDigest = useMutation({
+    mutationFn: (m: string) => dashboardApi.digestGenerate(m),
+    onSuccess: (d) => qc.setQueryData(['digest', d.month], d),
+  })
+  const deleteDigest = useMutation({
+    mutationFn: (m: string) => dashboardApi.digestDelete(m),
+    onSuccess: (_r, m) => qc.setQueryData(['digest', m], { ai: true, month: m, saved: false }),
+  })
 
   const { data: categories = [] } = useQuery({ queryKey: ['categories'], queryFn: categoriesApi.list })
   const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: tagsApi.list })
@@ -487,7 +511,55 @@ export default function Charts() {
       <div className="mb-4 flex items-baseline gap-3">
         <h1 className="text-xl font-bold">Gráficos</h1>
         <p className="text-xs text-zinc-500">Período: {rangeLabel}</p>
+        {digestMonth && (
+          <span className="flex items-center gap-2">
+            <button
+              onClick={() => generateDigest.mutate(digestMonth)}
+              disabled={digestLoading || generateDigest.isPending}
+              className="rounded border border-cyan-500/50 px-2.5 py-1 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
+              title="Gera um resumo em português do mês usando IA (pode ser regenerado a qualquer momento)"
+            >
+              {generateDigest.isPending ? 'Gerando…' : digest?.saved ? '🔄 Regenerar' : 'Gerar resumo (IA)'}
+            </button>
+            {digest?.saved && (
+              <>
+                <span className="text-xs text-zinc-500">salvo em {fmtUpdatedAt(digest.updated_at)}</span>
+                <button
+                  onClick={() => deleteDigest.mutate(digestMonth)}
+                  className="text-xs text-zinc-500 hover:text-red-400"
+                  title="Apaga o resumo salvo deste mês"
+                >
+                  Apagar
+                </button>
+              </>
+            )}
+          </span>
+        )}
       </div>
+
+      {digestMonth && digest?.saved && digest.resumo && (
+        <div className="mb-4 rounded border border-zinc-700 bg-zinc-900 px-4 py-3">
+          <div className="mb-1 flex items-baseline gap-2">
+            <h2 className="text-sm font-semibold text-zinc-200">Resumo de {digest.month}</h2>
+            <span className="text-xs text-zinc-500">gerado por IA · salvo em {fmtUpdatedAt(digest.updated_at)}</span>
+          </div>
+          {digest.resumo && <p className="text-sm leading-relaxed text-zinc-300">{digest.resumo}</p>}
+          {digest.destaques && digest.destaques.length > 0 && (
+            <ul className="mt-2 list-disc space-y-0.5 pl-4 text-sm text-zinc-400">
+              {digest.destaques.map((d, i) => (
+                <li key={i}>{d}</li>
+              ))}
+            </ul>
+          )}
+          {digest.avisos && digest.avisos.length > 0 && (
+            <ul className="mt-2 list-disc space-y-0.5 pl-4 text-sm text-amber-300/90">
+              {digest.avisos.map((a, i) => (
+                <li key={i}>⚠ {a}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       <ItemFilters
         value={filters}

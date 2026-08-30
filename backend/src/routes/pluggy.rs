@@ -82,6 +82,8 @@ pub async fn sync(
     // Pick up any .env changes without a restart.
     let seeded = pluggy::seed_configured_accounts(&state.pool, &state.pluggy_accounts).await?;
     let results = pluggy::sync_all_accounts(&state.pool, client, q.from, q.to).await?;
+    // MCC → category rule (zero-cost, deterministic) for uncategorized card items.
+    let mcc_categorized = crate::services::mcc::apply_mcc_categories(&state.pool).await?;
     // Assign installment items to purchase series (feeds the forecast).
     let series = pluggy::assign_installment_series(&state.pool).await?;
     // Link refunds to the charges they reverse (for graph netting).
@@ -92,6 +94,7 @@ pub async fn sync(
         "configured": seeded,
         "accounts": results,
         "new": total_new,
+        "mcc_categorized": mcc_categorized,
         "series": series,
         "linked_refunds": linked_refunds,
     })))

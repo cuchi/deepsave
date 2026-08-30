@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::models::{BulkItemUpdate, Item, ItemInput, ItemSummary, TagsMode};
-use crate::services::{memory, recurring, tags};
+use crate::services::{recurring, tags};
 use crate::AppState;
 
 pub(crate) const ITEM_COLS: &str = "id, parent_id, document_id, source, kind, status, account_id, \
@@ -251,7 +251,7 @@ pub async fn items_summary(
 /// Core bulk-edit logic, kept separate from the handler so integration tests can
 /// call it without building an `AppState`. Runs the field updates in one
 /// transaction; unknown ids are silently ignored. Memory recording is a
-/// best-effort side effect performed after commit (opt-in via `update_memory`).
+
 pub async fn bulk_update_items(
     pool: &PgPool,
     input: BulkItemUpdate,
@@ -270,9 +270,18 @@ pub async fn bulk_update_items(
         }
     }
 
-    let category_changed = input.category_id.is_some();
     let tags = input.tags.as_deref().map(tags::normalize);
     let tags_mode = input.tags_mode.unwrap_or(TagsMode::Replace);
+
+    // Capture before-state for the change log.
+    let before_rows: Vec<(Uuid, Option<Uuid>, Vec<String>)> = sqlx::query_as(
+        "SELECT id, category_id, tags FROM items WHERE id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    let before: std::collections::HashMap<Uuid, (Option<Uuid>, Vec<String>)> =
+        before_rows.into_iter().map(|(id, c, t)| (id, (c, t))).collect();
 
     let mut tx = pool.begin().await?;
 
@@ -332,24 +341,25 @@ pub async fn bulk_update_items(
 
     tx.commit().await?;
 
-    // Memory is a side channel: run after commit, opt-in only, and only when the
-    // category is actually being changed. `category_id` here is Copy, so it is
-    // still available after the match above.
-    if input.update_memory && category_changed {
-        // Record the tags being (re)applied too — but never tags being removed.
-        let mem_tags: Vec<String> = match (&tags, tags_mode) {
-            (Some(t), TagsMode::Add | TagsMode::Replace) => t.clone(),
-            _ => Vec::new(),
-        };
-        let merchants: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT merchant FROM items WHERE id = ANY($1) AND merchant IS NOT NULL",
+    // Log the changes (durable history for the AI).
+    let after_rows: Vec<(Uuid, Option<Uuid>, Vec<String>)> = sqlx::query_as(
+        "SELECT id, category_id, tags FROM items WHERE id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    for (id, after_cat, after_tags) in after_rows {
+        let (before_cat, before_tags) = before.get(&id).cloned().unwrap_or((None, vec![]));
+        let _ = crate::services::change_log::log_item_change(
+            pool,
+            id,
+            before_cat,
+            after_cat,
+            &before_tags,
+            &after_tags,
+            "bulk",
         )
-        .bind(&ids)
-        .fetch_all(pool)
-        .await?;
-        for m in &merchants {
-            memory::record_confirmation(pool, m, input.category_id.flatten(), &mem_tags).await?;
-        }
+        .await;
     }
 
     // Report how many of the selected ids actually exist (unknown ids ignored).
@@ -422,6 +432,14 @@ pub async fn update(
     if !BULK_KINDS.contains(&input.kind.as_str()) {
         return Err(AppError::bad_request("invalid kind"));
     }
+    // Capture the before state for the change log.
+    let before: Option<(Option<Uuid>, Vec<String>)> =
+        sqlx::query_as("SELECT category_id, tags FROM items WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let (before_cat, before_tags) = before.unwrap_or((None, vec![]));
+
     let item = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
         "UPDATE items
          SET parent_id = $1, kind = $2, account_id = $3, installment = $4,
@@ -448,13 +466,17 @@ pub async fn update(
     .await?
     .ok_or_else(|| AppError::not_found("item not found"))?;
 
-    // A manual edit is a correction: feed the categorization memory (category + tags),
-    // unless the user opted out (structural/seasonal edits).
-    if input.update_memory {
-        if let Some(m) = input.merchant.as_deref() {
-            memory::record_confirmation(&state.pool, m, input.category_id, &input.tags).await?;
-        }
-    }
+    // Log the change (durable history for the AI).
+    let _ = crate::services::change_log::log_item_change(
+        &state.pool,
+        id,
+        before_cat,
+        input.category_id,
+        &before_tags,
+        &tags::normalize(&input.tags),
+        "item_edit",
+    )
+    .await;
 
     Ok(Json(item))
 }
@@ -479,27 +501,17 @@ pub async fn confirm(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let row: Option<(Option<String>, Option<Uuid>, Vec<String>)> =
-        sqlx::query_as("SELECT merchant, category_id, tags FROM items WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((merchant, category_id, item_tags)) = row else {
-        return Err(AppError::not_found("item not found"));
-    };
-
-    sqlx::query("UPDATE items SET status = 'confirmed', updated_at = now() WHERE id = $1")
+    let affected = sqlx::query("UPDATE items SET status = 'confirmed', updated_at = now() WHERE id = $1")
         .bind(id)
         .execute(&state.pool)
-        .await?;
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        return Err(AppError::not_found("item not found"));
+    }
 
     // Auto-link to a recurring rule whose alias matches this item.
     recurring::link_item(&state.pool, id).await?;
-
-    // Strengthen the categorization memory on confirmation (tags accumulate).
-    if let Some(m) = &merchant {
-        memory::record_confirmation(&state.pool, m, category_id, &item_tags).await?;
-    }
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -595,54 +607,6 @@ async fn set_item_link(pool: &PgPool, ids: &[Uuid], rule_id: Option<Uuid>) -> Re
 
 /// Apply the remembered category + tags for this item's merchant (one-click).
 /// Category replaces; tags are added (union) — situational tags stay.
-pub async fn apply_memory(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Item>, AppError> {
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT merchant FROM items WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((Some(merchant),)) = row else {
-        return Err(AppError::not_found("item not found or has no merchant"));
-    };
-
-    let normalized = tags::strip_accents(merchant.trim()).to_lowercase();
-    let mem: Option<(Option<Uuid>, Vec<String>)> = sqlx::query_as(
-        "SELECT category_id, tags FROM merchant_memory WHERE merchant = $1",
-    )
-    .bind(&normalized)
-    .fetch_optional(&state.pool)
-    .await?;
-    let Some((category_id, mem_tags)) = mem else {
-        return Err(AppError::not_found("no memory for this merchant"));
-    };
-    if category_id.is_none() && mem_tags.is_empty() {
-        return Err(AppError::not_found("no memory for this merchant"));
-    }
-
-    // Apply the remembered category (replace) + tags (add/union) to this item.
-    let item = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
-        "UPDATE items SET
-           category_id = COALESCE($1, category_id),
-           tags = COALESCE(
-             (SELECT array_agg(t ORDER BY ord)
-              FROM (SELECT t, min(ord) AS ord
-                    FROM unnest(items.tags || $2) WITH ORDINALITY AS u(t, ord)
-                    GROUP BY t) s),
-             '{{}}'::text[]),
-           updated_at = now()
-         WHERE id = $3
-         RETURNING {ITEM_COLS}"
-    )))
-    .bind(category_id)
-    .bind(&mem_tags)
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
-    Ok(Json(item))
-}
 
 /// Create the suggested category (if needed) and assign it to the item.
 pub async fn accept_suggestion(

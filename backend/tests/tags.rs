@@ -51,28 +51,14 @@ async fn rename_cascades_and_dedupes(pool: PgPool) {
 
     // Recurring rules are NOT touched anymore: their tags are derived from linked
     // items, so a rename on items automatically reflects there.
-    sqlx::query("INSERT INTO merchant_memory (merchant, tags) VALUES ('loja x', $1)")
-        .bind(&vec!["compras".to_string()])
-        .execute(&pool)
-        .await
-        .unwrap();
-
     let res = tags::rename(&pool, "compras", "mercado").await.unwrap();
     assert_eq!(res.items_updated, 2);
-    assert_eq!(res.memory_updated, 1);
 
     assert_eq!(item_tags(&pool, "a").await, vec!["mercado".to_string()]);
     assert_eq!(
         item_tags(&pool, "b").await,
         vec!["mercado".to_string(), "lazer".to_string()]
     );
-
-    let memory: Vec<String> =
-        sqlx::query_scalar("SELECT tags FROM merchant_memory WHERE merchant = 'loja x'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(memory, vec!["mercado".to_string()]);
 }
 
 #[sqlx::test]

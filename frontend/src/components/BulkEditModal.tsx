@@ -67,7 +67,6 @@ export default function BulkEditModal({ ids, onClose, onApply }: Props) {
       input.tags_mode = mode
     }
     if (remember && categoryChosen) {
-      input.update_memory = true
     }
 
     try {

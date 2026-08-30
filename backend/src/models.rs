@@ -49,9 +49,6 @@ fn default_kind() -> String {
 fn default_currency() -> String {
     "BRL".to_string()
 }
-fn default_true() -> bool {
-    true
-}
 
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Item {
@@ -111,11 +108,6 @@ pub struct ItemInput {
     pub category_id: Option<Uuid>,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Opt-out: feed the categorization memory (category + tags) on this edit.
-    /// A single edit is a correction, so this defaults to **on**; uncheck for
-    /// structural/seasonal edits. (Bulk edits default to off — see `BulkItemUpdate`.)
-    #[serde(default = "default_true")]
-    pub update_memory: bool,
 }
 
 /// Filtered summary for the items list (`GET /api/items/summary`).
@@ -149,11 +141,6 @@ pub struct BulkItemUpdate {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub tags_mode: Option<TagsMode>,
-    /// Opt-in: feed the categorization memory (per distinct merchant) when the
-    /// category is being changed. Off by default — bulk edits are often
-    /// structural/seasonal rather than per-merchant corrections.
-    #[serde(default)]
-    pub update_memory: bool,
 }
 
 // ---------- Accounts ----------
@@ -183,6 +170,8 @@ pub struct AiTagBatch {
     pub item_count: i64,
     pub created_at: DateTime<Utc>,
     pub processed_at: Option<DateTime<Utc>>,
+    /// 'tags' | 'categorize' — which proposal flow this batch runs.
+    pub kind: String,
 }
 
 /// A tag suggestion joined with the item it refers to (for the review UI).
@@ -192,8 +181,13 @@ pub struct SuggestionDetail {
     pub batch_id: Uuid,
     /// Status of the owning batch ('done' when the suggestions are reviewable).
     pub batch_status: String,
+    /// 'tags' | 'categorize'
+    pub batch_kind: String,
     pub item_id: Uuid,
     pub suggested_tags: Vec<String>,
+    /// Category proposal for 'categorize' batches ('' when none) — an existing
+    /// name or "nova: <nome>".
+    pub suggested_category: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
     // Item columns (joined in).
@@ -240,4 +234,20 @@ pub struct RecurringRule {
     /// Days until the effective next due date (negative only if already past —
     /// shouldn't happen; read-time advance keeps it >= 0).
     pub days_until: Option<i64>,
+}
+
+// ---------- Diary ----------
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct DiaryEntry {
+    pub id: Uuid,
+    pub entry_date: chrono::NaiveDate,
+    pub comment: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiaryInput {
+    pub entry_date: chrono::NaiveDate,
+    pub comment: String,
 }

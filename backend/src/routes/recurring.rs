@@ -363,16 +363,13 @@ pub async fn merchant_names(pool: &PgPool, q: &str) -> Result<Vec<String>, AppEr
     let mut names: Vec<String> = sqlx::query_scalar(
         "SELECT COALESCE(NULLIF(merchant, ''), description) FROM items
          WHERE COALESCE(NULLIF(merchant, ''), description) ILIKE '%' || $1 || '%'
-         UNION
-         SELECT merchant FROM merchant_memory
-         WHERE merchant <> '' AND merchant ILIKE '%' || $1 || '%'
          ORDER BY 1 LIMIT 25",
     )
     .bind(&q)
     .fetch_all(pool)
     .await?;
-    // Raw item names and normalized memory merchants can both be present;
-    // dedupe case/accent-insensitively (keep the first, sorted variant).
+    // Raw item names can carry duplicates (spacing/case); dedupe
+    // case/accent-insensitively (keep the first, sorted variant).
     let mut seen = std::collections::HashSet::new();
     names.retain(|n| seen.insert(recurring::normalize_name(n)));
     Ok(names)
@@ -428,14 +425,8 @@ pub async fn merchant_profile(
         return Err(AppError::not_found("nenhum item encontrado para este nome"));
     };
 
-    // Category: memory first (merchant_memory stores normalized merchants), else last item's.
-    let mem_category: Option<Option<Uuid>> = sqlx::query_scalar(
-        "SELECT category_id FROM merchant_memory WHERE merchant = $1",
-    )
-    .bind(&normalized)
-    .fetch_optional(&state.pool)
-    .await?;
-    let category_id = mem_category.flatten().or(last.4);
+    // Category: from the latest matched item.
+    let category_id = last.4;
     let category_name: Option<String> = match category_id {
         Some(cid) => sqlx::query_scalar("SELECT name FROM categories WHERE id = $1")
             .bind(cid)

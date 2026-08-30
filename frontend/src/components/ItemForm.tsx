@@ -40,7 +40,6 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
   const [categoryId, setCategoryId] = useState(editing?.category_id ?? '')
   const [tags, setTags] = useState<string[]>(editing?.tags ?? [])
   const [tagInput, setTagInput] = useState('')
-  const [updateMemory, setUpdateMemory] = useState(true)
   const [busy, setBusy] = useState(false)
 
   const addTag = () => {
@@ -71,7 +70,6 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
         currency: editing.currency,
         category_id: categoryId || null,
         tags,
-        update_memory: updateMemory,
       }
     } else {
       const parsed = parseFloat(amount.replace(',', '.'))
@@ -195,16 +193,6 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
               </datalist>
             </div>
 
-            <label className="flex items-center gap-2 text-xs text-zinc-400">
-              <input
-                type="checkbox"
-                checked={updateMemory}
-                onChange={(e) => setUpdateMemory(e.target.checked)}
-                disabled={!editing!.merchant}
-                className="checkbox"
-              />
-              Salvar na memória (categoria + tags deste comerciante)
-            </label>
           </>
         ) : (
           <>

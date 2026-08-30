@@ -58,7 +58,6 @@ pub async fn usage(pool: &sqlx::PgPool) -> Result<Vec<crate::models::TagUsage>, 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TagRename {
     pub items_updated: u64,
-    pub memory_updated: u64,
 }
 
 /// Replace `from` with `to` everywhere tags are stored. If `to` already exists on a
@@ -85,25 +84,20 @@ pub async fn rename(pool: &sqlx::PgPool, from: &str, to: &str) -> Result<TagRena
     .await?
     .rows_affected();
 
-    let memory_updated = sqlx::query(
-        "UPDATE merchant_memory
-         SET tags = CASE
-                 WHEN $2 = ANY(tags) THEN array_remove(tags, $1)
-                 ELSE array_replace(tags, $1, $2)
-             END,
-             updated_at = now()
-         WHERE $1 = ANY(tags)",
-    )
-    .bind(from)
-    .bind(to)
-    .execute(pool)
-    .await?
-    .rows_affected();
+    // Registry: when the target already has a description, the source merges into
+    // it (target's description wins); otherwise carry the source's row over.
+    sqlx::query("DELETE FROM tags WHERE name = $1 AND EXISTS (SELECT 1 FROM tags WHERE name = $2)")
+        .bind(from)
+        .bind(to)
+        .execute(pool)
+        .await?;
+    sqlx::query("UPDATE tags SET name = $2 WHERE name = $1")
+        .bind(from)
+        .bind(to)
+        .execute(pool)
+        .await?;
 
-    Ok(TagRename {
-        items_updated,
-        memory_updated,
-    })
+    Ok(TagRename { items_updated })
 }
 
 /// Drop a tag from every row that carries it.
@@ -116,16 +110,39 @@ pub async fn remove(pool: &sqlx::PgPool, tag: &str) -> Result<TagRename, sqlx::E
     .await?
     .rows_affected();
 
-    let memory_updated = sqlx::query(
-        "UPDATE merchant_memory SET tags = array_remove(tags, $1), updated_at = now() WHERE $1 = ANY(tags)",
-    )
-    .bind(tag)
-    .execute(pool)
-    .await?
-    .rows_affected();
+    sqlx::query("DELETE FROM tags WHERE name = $1")
+        .bind(tag)
+        .execute(pool)
+        .await?;
 
     Ok(TagRename {
         items_updated,
-        memory_updated,
     })
+}
+
+/// Set (or create) the description of a tag in the registry.
+pub async fn upsert_description(pool: &sqlx::PgPool, tag: &str, description: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO tags (name, description) VALUES ($1, $2)
+         ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description",
+    )
+    .bind(tag)
+    .bind(description)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Registry descriptions for a set of tags (empty map when none are described).
+/// Used to inject "tag X = <desc>" context into AI prompts.
+pub async fn tag_descriptions(
+    pool: &sqlx::PgPool,
+    tags: &[String],
+) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT name, description FROM tags WHERE description <> '' AND name = ANY($1)")
+            .bind(tags)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
 }

@@ -72,8 +72,6 @@ export interface ItemInput {
   currency?: string
   category_id?: string | null
   tags?: string[]
-  /** Feed the categorization memory on this edit (defaults on for single edits). */
-  update_memory?: boolean
 }
 
 export interface ItemListParams {
@@ -102,7 +100,6 @@ export interface BulkItemUpdateInput {
   category_id?: string | null
   tags?: string[]
   tags_mode?: 'replace' | 'add' | 'remove'
-  update_memory?: boolean
 }
 
 export const itemsApi = {
@@ -135,9 +132,6 @@ export const itemsApi = {
   },
   async reject(id: string): Promise<{ ok: boolean }> {
     return (await api.post(`/items/${id}/reject`)).data
-  },
-  async applyMemory(id: string): Promise<Item> {
-    return (await api.post<Item>(`/items/${id}/apply-memory`)).data
   },
   async acceptSuggestion(id: string): Promise<Item> {
     return (await api.post<Item>(`/items/${id}/accept-suggestion`)).data
@@ -260,12 +254,35 @@ export const dashboardApi = {
   async upcoming(days = 90): Promise<UpcomingItem[]> {
     return (await api.get<UpcomingItem[]>('/dashboard/upcoming', { params: { days } })).data
   },
+  /** Saved AI narrative for a month (YYYY-MM) — read-only, no AI call. */
+  async digestGet(month: string): Promise<DigestResult> {
+    return (await api.get<DigestResult>('/dashboard/digest', { params: { month } })).data
+  },
+  /** Generate (or regenerate) and save the digest for a month. */
+  async digestGenerate(month: string): Promise<DigestResult> {
+    return (await api.post<DigestResult>('/dashboard/digest', null, { params: { month } })).data
+  },
+  /** Delete the saved digest for a month. */
+  async digestDelete(month: string): Promise<{ ok: boolean }> {
+    return (await api.delete('/dashboard/digest', { params: { month } })).data
+  },
+}
+
+export interface DigestResult {
+  ai: boolean
+  month?: string
+  saved?: boolean
+  updated_at?: string
+  resumo?: string
+  destaques?: string[]
+  avisos?: string[]
 }
 
 export const aiTagsApi = {
   /** Enqueue AI tagging for the selected items. */
-  async createBatch(ids: string[]): Promise<AiTagBatch> {
-    return (await api.post<AiTagBatch>('/ai-tags/batches', { ids })).data
+  /** kind: 'tags' (default) or 'categorize' */
+  async createBatch(ids: string[], kind: 'tags' | 'categorize' = 'tags'): Promise<AiTagBatch> {
+    return (await api.post<AiTagBatch>('/ai-tags/batches', { ids, kind })).data
   },
   async listBatches(): Promise<AiTagBatch[]> {
     return (await api.get<AiTagBatch[]>('/ai-tags/batches')).data
@@ -306,6 +323,17 @@ export const tagsApi = {
   async remove(tag: string): Promise<TagRenameResult> {
     return (await api.delete<TagRenameResult>(`/tags/${encodeURIComponent(tag)}`)).data
   },
+  async registry(): Promise<TagRegistryEntry[]> {
+    return (await api.get<TagRegistryEntry[]>('/tags/registry')).data
+  },
+  async setDescription(tag: string, description: string): Promise<TagRenameResult> {
+    return (await api.patch<TagRenameResult>(`/tags/${encodeURIComponent(tag)}`, { description })).data
+  },
+}
+
+export interface TagRegistryEntry {
+  name: string
+  description: string
 }
 
 export interface TagRenameResult {
@@ -314,62 +342,6 @@ export interface TagRenameResult {
   memory_updated: number
 }
 
-export interface MemoryEntry {
-  id: string
-  merchant: string
-  category_id: string | null
-  category_name: string | null
-  tags: string[]
-  confidence: number
-  confirm_count: number
-  last_confirmed_at: string | null
-}
-
-export interface MemoryInput {
-  merchant: string
-  category_id: string | null
-  tags?: string[]
-}
-
-export interface MemoryUpdateInput {
-  category_id: string | null
-  tags?: string[]
-}
-
-/** One item the user can select to apply memory to (from `/memory/preview`). */
-export interface MemoryPreviewItem {
-  item_id: string
-  merchant: string
-  description: string
-  occurred_on: string
-  amount_cents: number
-  current_category: string | null
-  proposed_category: string | null
-  tags_to_add: string[]
-  /** Subset of ['category', 'tags'] — what would change. */
-  changes: string[]
-}
-
-export const memoryApi = {
-  async list(): Promise<MemoryEntry[]> {
-    return (await api.get<MemoryEntry[]>('/memory')).data
-  },
-  async create(input: MemoryInput): Promise<MemoryEntry> {
-    return (await api.post<MemoryEntry>('/memory', input)).data
-  },
-  async update(id: string, input: MemoryUpdateInput): Promise<MemoryEntry> {
-    return (await api.patch<MemoryEntry>(`/memory/${id}`, input)).data
-  },
-  async remove(id: string): Promise<{ ok: boolean }> {
-    return (await api.delete(`/memory/${id}`)).data
-  },
-  async preview(merchant: string | null): Promise<MemoryPreviewItem[]> {
-    return (await api.post<MemoryPreviewItem[]>('/memory/preview', { merchant })).data
-  },
-  async apply(merchant: string | null, ids: string[]): Promise<{ updated: number }> {
-    return (await api.post('/memory/apply', { merchant, ids })).data
-  },
-}
 
 export interface RecurringInput {
   name: string
@@ -454,5 +426,55 @@ export const pluggyApi = {
     return (await api.post<PluggySyncResult>('/pluggy/sync', undefined, {
       params: from || to ? { from, to } : {},
     })).data
+  },
+}
+
+export interface ChangeLogEntry {
+  created_at: string
+  merchant: string | null
+  merchant_key: string
+  category_before: string | null
+  category_after: string | null
+  tags_before: string[]
+  tags_after: string[]
+  source: string
+  description: string | null
+  /** Transaction date (when the purchase happened), if known. */
+  tx_date: string | null
+  amount_cents: number | null
+  kind: string | null
+  bank: string | null
+  mcc: number | null
+  pluggy_category: string | null
+  operation_type: string | null
+  current_category: string | null
+  current_tags: string[]
+}
+
+export const changeLogApi = {
+  async list(params: { merchant?: string; source?: string; limit?: number } = {}): Promise<ChangeLogEntry[]> {
+    return (await api.get<ChangeLogEntry[]>('/change-log', { params })).data
+  },
+}
+
+export interface DiaryEntry {
+  id: string
+  entry_date: string
+  comment: string
+  created_at: string
+}
+
+export const diaryApi = {
+  async list(): Promise<DiaryEntry[]> {
+    return (await api.get<DiaryEntry[]>('/diary')).data
+  },
+  async create(input: { entry_date: string; comment: string }): Promise<DiaryEntry> {
+    return (await api.post<DiaryEntry>('/diary', input)).data
+  },
+  async update(id: string, input: { entry_date: string; comment: string }): Promise<DiaryEntry> {
+    return (await api.patch<DiaryEntry>(`/diary/${id}`, input)).data
+  },
+  async remove(id: string): Promise<{ ok: boolean }> {
+    return (await api.delete(`/diary/${id}`)).data
   },
 }

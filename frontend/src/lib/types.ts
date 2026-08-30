@@ -105,14 +105,18 @@ export interface AiTagBatch {
   item_count: number
   created_at: string
   processed_at: string | null
+  kind: 'tags' | 'categorize'
 }
 
 export interface SuggestionDetail {
   id: string
   batch_id: string
   batch_status: string
+  batch_kind: 'tags' | 'categorize'
   item_id: string
   suggested_tags: string[]
+  /** Category proposal for categorize batches ('' when none; may be "nova: X"). */
+  suggested_category: string
   status: 'pending' | 'applied' | 'dismissed'
   created_at: string
   merchant: string | null

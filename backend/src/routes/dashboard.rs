@@ -1,12 +1,13 @@
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use chrono::{Datelike, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::error::AppError;
 use crate::AppState;
+use crate::error::AppError;
 
 #[derive(Debug, Deserialize)]
 pub struct DashboardQuery {
@@ -126,9 +127,11 @@ const BUCKET_CAT: &str = "COALESCE(rc.category_id, items.category_id)";
 const BUCKET_MERCHANT: &str = "COALESCE(rc.merchant, items.merchant)";
 const BUCKET_TAGS: &str = "COALESCE(rc.tags, items.tags)";
 /// Expense rows: expenses plus refunds linked to an expense charge.
-const EXPENSE_OR_REFUND: &str = "(items.kind = 'expense' OR (items.kind = 'refund' AND rc.kind = 'expense'))";
+const EXPENSE_OR_REFUND: &str =
+    "(items.kind = 'expense' OR (items.kind = 'refund' AND rc.kind = 'expense'))";
 /// Join to the charge a refund reverses (netting target).
-const REFUND_JOIN: &str = "LEFT JOIN items rc ON rc.id = items.refunded_item_id AND rc.kind = 'expense'";
+const REFUND_JOIN: &str =
+    "LEFT JOIN items rc ON rc.id = items.refunded_item_id AND rc.kind = 'expense'";
 
 /// Resolve the aggregation window: explicit date range wins; else `month`;
 /// else no date filter (all history). The UI pre-fills the last complete month
@@ -259,9 +262,10 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     .fetch_all(pool)
     .await?;
 
-    let pending_count: i64 = sqlx::query_scalar("SELECT count(*) FROM items WHERE status = 'pending_review'")
-        .fetch_one(pool)
-        .await?;
+    let pending_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM items WHERE status = 'pending_review'")
+            .fetch_one(pool)
+            .await?;
 
     Ok(Dashboard {
         month: label,
@@ -271,6 +275,358 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
         top_merchants,
         pending_count,
     })
+}
+
+/// Digest: saved AI narrative per month. `GET` reads the saved digest (no AI
+/// call), `POST` generates + upserts it, `DELETE` removes it. Generation is
+/// explicit so the user can regenerate anytime and the summary stays stable
+/// until then. Graceful: returns `{"ai": false}` when no AI is configured.
+#[derive(Debug, Deserialize)]
+pub struct DigestQuery {
+    pub month: Option<String>,
+}
+
+/// "YYYY-MM" → first day of that month as a NaiveDate.
+fn month_first_day(month: &str) -> Result<NaiveDate, AppError> {
+    let (y, m) = month
+        .split_once('-')
+        .ok_or_else(|| AppError::bad_request("month must be YYYY-MM"))?;
+    let year: i32 = y.parse().map_err(|_| AppError::bad_request("invalid month"))?;
+    let mo: u32 = m.parse().map_err(|_| AppError::bad_request("invalid month"))?;
+    NaiveDate::from_ymd_opt(year, mo, 1).ok_or_else(|| AppError::bad_request("invalid month"))
+}
+
+fn digest_month(q: &DigestQuery) -> String {
+    q.month.clone().unwrap_or_else(|| {
+        let t = chrono::Utc::now().date_naive();
+        format!("{}-{:02}", t.year(), t.month())
+    })
+}
+
+/// Read the saved digest for a month (never calls the AI).
+pub async fn digest_get(
+    State(state): State<AppState>,
+    Query(q): Query<DigestQuery>,
+) -> Result<Json<Value>, AppError> {
+    if !state.ai.enabled() {
+        return Ok(Json(json!({ "ai": false })));
+    }
+    let month = digest_month(&q);
+    let (from, _to, label) = match resolve_range(None, None, Some(&month))? {
+        (Some(f), Some(t), label) => (f, t, label),
+        _ => unreachable!("month always resolves to a range"),
+    };
+    let saved: Option<(String, String, Value, Value, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as(
+            "SELECT to_char(month, 'YYYY-MM'), resumo, destaques, avisos, updated_at
+             FROM monthly_digests WHERE month = $1",
+        )
+        .bind(from)
+        .fetch_optional(&state.pool)
+        .await?;
+    let out = match saved {
+        Some((_, resumo, destaques, avisos, updated_at)) => json!({
+            "ai": true,
+            "month": label,
+            "saved": true,
+            "resumo": resumo,
+            "destaques": destaques,
+            "avisos": avisos,
+            "updated_at": updated_at,
+        }),
+        None => json!({ "ai": true, "month": label, "saved": false }),
+    };
+    Ok(Json(out))
+}
+
+/// Generate (or regenerate) + save the digest for a month.
+pub async fn digest_post(
+    State(state): State<AppState>,
+    Query(q): Query<DigestQuery>,
+) -> Result<Json<Value>, AppError> {
+    let month = digest_month(&q);
+    let value = generate_digest(&state, &month).await?;
+    let from = month_first_day(&month)?;
+    let saved: (chrono::DateTime<chrono::Utc>,) = sqlx::query_as(
+        "INSERT INTO monthly_digests (month, resumo, destaques, avisos)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (month) DO UPDATE
+           SET resumo = EXCLUDED.resumo, destaques = EXCLUDED.destaques,
+               avisos = EXCLUDED.avisos, updated_at = now()
+         RETURNING updated_at",
+    )
+    .bind(from)
+    .bind(value.get("resumo").and_then(|v| v.as_str()).unwrap_or(""))
+    .bind(value.get("destaques").cloned().unwrap_or(Value::Array(vec![])))
+    .bind(value.get("avisos").cloned().unwrap_or(Value::Array(vec![])))
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "ai": true,
+        "month": value.get("month").and_then(|v| v.as_str()).unwrap_or(&month),
+        "saved": true,
+        "resumo": value.get("resumo").cloned().unwrap_or(Value::String(String::new())),
+        "destaques": value.get("destaques").cloned().unwrap_or(Value::Array(vec![])),
+        "avisos": value.get("avisos").cloned().unwrap_or(Value::Array(vec![])),
+        "updated_at": saved.0,
+    })))
+}
+
+/// Remove the saved digest for a month.
+pub async fn digest_delete(
+    State(state): State<AppState>,
+    Query(q): Query<DigestQuery>,
+) -> Result<Json<Value>, AppError> {
+    let month = digest_month(&q);
+    let from = month_first_day(&month)?;
+    sqlx::query("DELETE FROM monthly_digests WHERE month = $1")
+        .bind(from)
+        .execute(&state.pool)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Build the AI digest for a month (payload + DeepSeek call, recorded in ai_calls).
+async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppError> {
+    if !state.ai.enabled() {
+        return Ok(json!({ "ai": false }));
+    }
+    let (from, to, label) = match resolve_range(None, None, Some(month))? {
+        (Some(f), Some(t), label) => (f, t, label),
+        _ => unreachable!("month always resolves to a range"),
+    };
+
+    // How far in the past the analyzed month is (0 = current month), and
+    // whether the forecast/recurring context is still relevant: only for the
+    // current month or the first 15 days of the next one.
+    let today = chrono::Utc::now().date_naive();
+    let months_ago = ((today.year() * 12 + today.month() as i32)
+        - (from.year() * 12 + from.month() as i32))
+    .max(0);
+    let previsao_relevante = today <= from + Months::new(1) + chrono::Duration::days(15);
+
+    // Current month aggregates (reuse the dashboard core).
+    let dash = dashboard_data(
+        &state.pool,
+        &DashboardQuery {
+            month: Some(month.to_string()),
+            date_from: None,
+            date_to: None,
+            search: None,
+            category_ids: None,
+            kind: None,
+            tags: None,
+            bank: None,
+            installments: None,
+        },
+    )
+    .await?;
+
+    // Previous month (for the delta).
+    let prev_start = from - Months::new(1);
+    let prev_end = to - Months::new(1);
+    let prev_spend: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CASE WHEN kind='expense' AND status <> 'rejected' THEN -amount_cents ELSE 0 END), 0)::bigint
+         FROM items WHERE parent_id IS NULL AND occurred_on >= $1 AND occurred_on <= $2",
+    )
+    .bind(prev_start)
+    .bind(prev_end)
+    .fetch_one(&state.pool)
+    .await?;
+    let prev_income: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CASE WHEN kind='income' AND status <> 'rejected' THEN amount_cents ELSE 0 END), 0)::bigint
+         FROM items WHERE parent_id IS NULL AND occurred_on >= $1 AND occurred_on <= $2",
+    )
+    .bind(prev_start)
+    .bind(prev_end)
+    .fetch_one(&state.pool)
+    .await?;
+
+    // Merchants first seen this month.
+    let new_merchants: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT merchant FROM items i
+         WHERE merchant IS NOT NULL AND merchant <> ''
+           AND occurred_on >= $1 AND occurred_on <= $2
+           AND NOT EXISTS (SELECT 1 FROM items i2 WHERE i2.merchant = i.merchant AND i2.occurred_on < $1)
+         ORDER BY merchant LIMIT 8",
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_all(&state.pool)
+    .await?;
+
+    // Upcoming obligations (next 30 days) + recurring monthly cost — only
+    // relevant for recent months (current month / first 15 days of next).
+    let upcoming_total: i64 = if previsao_relevante {
+        let upcoming = upcoming_data(&state.pool, 30).await?;
+        upcoming.iter().map(|u| u.amount_cents).sum()
+    } else {
+        0
+    };
+    let recurring_monthly: i64 = if previsao_relevante {
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(
+               CASE
+                 WHEN frequency = 'weekly' THEN -amount_cents * 52.0 / 12.0 / GREATEST(interval, 1)
+                 WHEN frequency = 'monthly' THEN -amount_cents / GREATEST(interval, 1)
+                 ELSE -amount_cents / (12.0 * GREATEST(interval, 1))
+               END)::bigint, 0)::bigint
+             FROM recurring_rules WHERE is_active AND amount_cents < 0",
+        )
+        .fetch_one(&state.pool)
+        .await?
+    } else {
+        0
+    };
+
+    // Full month history (root items, non-rejected) — the raw material the AI
+    // derives insights from (compact fields; amount included so it can compute
+    // "maior gasto" without summing).
+    let history_rows: Vec<(
+        String,
+        Option<String>,
+        Vec<String>,
+        String,
+        Option<i32>,
+        Option<i32>,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT COALESCE(NULLIF(merchant, ''), description), c.name, i.tags, i.kind,
+                    i.installment, i.installment_count, i.amount_cents
+             FROM items i LEFT JOIN categories c ON c.id = i.category_id
+             WHERE i.parent_id IS NULL AND i.status <> 'rejected'
+               AND i.occurred_on >= $1 AND i.occurred_on <= $2
+             ORDER BY i.occurred_on LIMIT 500",
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_all(&state.pool)
+    .await?;
+    let history: Vec<Value> = history_rows
+        .into_iter()
+        .map(|(nome, cat, tags, kind, inst, inst_count, amt)| {
+            let parcela = match (inst, inst_count) {
+                (Some(n), Some(c)) => format!("{n}/{c}"),
+                _ => "1/1".to_string(),
+            };
+            json!({ "nome": nome, "cat": cat, "tags": tags, "tipo": kind, "parcela": parcela, "amt": amt })
+        })
+        .collect();
+
+    // Active recurring rules: name, amount, category, derived tags, window —
+    // only relevant for recent months.
+    let mut recorrentes: Vec<Value> = Vec::new();
+    if previsao_relevante {
+        let rec_rows: Vec<(String, i64, String, i32, Option<String>, Vec<String>)> = sqlx::query_as(
+            "SELECT r.name, r.amount_cents, r.frequency, r.interval,
+                    (SELECT c.name FROM items i JOIN categories c ON c.id = i.category_id
+                     WHERE i.recurring_id = r.id ORDER BY i.occurred_on DESC LIMIT 1),
+                    COALESCE((SELECT array_agg(DISTINCT t) FROM items i, unnest(i.tags) AS t
+                              WHERE i.recurring_id = r.id), '{}')
+             FROM recurring_rules r
+             WHERE r.is_active AND r.amount_cents < 0 ORDER BY r.name",
+        )
+        .fetch_all(&state.pool)
+        .await?;
+        recorrentes = rec_rows
+            .into_iter()
+            .map(|(nome, amt, freq, interval, cat, tags)| {
+                let janela = match freq.as_str() {
+                    "weekly" => {
+                        if interval > 1 {
+                            format!("a cada {interval} semanas")
+                        } else {
+                            "semanal".to_string()
+                        }
+                    }
+                    "monthly" => {
+                        if interval > 1 {
+                            format!("a cada {interval} meses")
+                        } else {
+                            "mensal".to_string()
+                        }
+                    }
+                    _ => {
+                        if interval > 1 {
+                            format!("a cada {interval} anos")
+                        } else {
+                            "anual".to_string()
+                        }
+                    }
+                };
+                json!({ "nome": nome, "amt": amt, "cat": cat, "tags": tags, "janela": janela })
+            })
+            .collect();
+    }
+
+    // Tag descriptions (F0): what each tag means to the user.
+    // Tag descriptions (F0): what each tag means to the user.
+    let tag_desc_rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT name, description FROM tags WHERE description <> '' ORDER BY name")
+            .fetch_all(&state.pool)
+            .await?;
+    let tag_desc: std::collections::HashMap<String, String> = tag_desc_rows.into_iter().collect();
+
+    // Diary: life notes that explain spending context (all entries — few).
+    let diario = crate::services::diary::recent_diary(&state.pool, 20).await?;
+
+    // Previous month's saved digest (if any) — gives the AI continuity.
+    let prev_digest: Option<(String, Value, Value)> = sqlx::query_as(
+        "SELECT resumo, destaques, avisos FROM monthly_digests WHERE month = $1",
+    )
+    .bind(from - Months::new(1))
+    .fetch_optional(&state.pool)
+    .await?;
+    let digest_anterior = prev_digest.map(|(r, d, a)| json!({
+        "resumo": r,
+        "destaques": d,
+        "avisos": a,
+    }));
+
+    let mut payload_map = serde_json::Map::new();
+    payload_map.insert("mes".into(), json!(label));
+    payload_map.insert("meses_atras".into(), json!(months_ago));
+    payload_map.insert("previsao_relevante".into(), json!(previsao_relevante));
+    payload_map.insert("gasto_total".into(), json!(dash.total_spend_cents));
+    payload_map.insert("receita_total".into(), json!(dash.total_income_cents));
+    payload_map.insert("gasto_mes_anterior".into(), json!(prev_spend));
+    payload_map.insert("receita_mes_anterior".into(), json!(prev_income));
+    payload_map.insert("historico".into(), json!(history));
+    payload_map.insert("tag_desc".into(), json!(tag_desc));
+    payload_map.insert("diario".into(), json!(diario));
+    payload_map.insert("digest_anterior".into(), json!(digest_anterior));
+    payload_map.insert("novos_mercados".into(), json!(new_merchants));
+    if previsao_relevante {
+        payload_map.insert("recorrentes".into(), json!(recorrentes));
+        payload_map.insert("proximos_30_dias".into(), json!(upcoming_total));
+        payload_map.insert("recorrencia_mensal".into(), json!(recurring_monthly));
+    }
+    let payload = Value::Object(payload_map);
+
+    let system = r#"Você é meu amigo engraçadinho, sádico e muito julgador. Responda APENAS com JSON válido no formato exato:
+{
+  "resumo": "2-3 frases: total gasto, receitas, comparação com o mês anterior (variação %), deixe algum comentário sarcástico e sádico seu.",
+  "destaques": ["2-4 itens: maiores categorias/mercados, coisas notáveis do mês"], use tom de ironia,
+  "avisos": ["alertas se relevantes: aumento de gasto, novos mercados com valores altos, compromissos futuros (próximos 30 dias), recorrentes mensais; lista vazia se nada relevante"]
+}
+Regras: valores em centavos (ex.: 123456 = R$ 1.234,56). Use formatação brasileira. Seja específico (nomes reais).
+NUNCA invente o tipo de negócio de um mercado/comerciante (ex.: não diga "o mercado X" ou "o restaurante Y" a menos que a categoria esteja informada no campo "cat" de "historico"). Cite apenas o nome e o valor. Se "cat" estiver presente, pode citá-la; senão, não adivinhe.
+"historico" é a lista de transações do mês (nome, cat, tags, tipo, parcela, amt em centavos) — use-a para identificar padrões e maiores gastos. "recorrentes" lista suas regras recorrentes (nome, amt, cat, tags, janela). "tag_desc" explica o significado das tags para o usuário (ex.: "sandero" = gastos com o carro) — respeite esses significados ao comentar. "digest_anterior" (se presente) é o resumo que você gerou no mês passado — use-o para dar continuidade: retome pontos que você levantou, confira se os avisos foram endereçados e compare o que você disse antes com o que aconteceu agora.
+TEMPO: você está analisando o mês de "mes", que terminou há "meses_atras" meses (0 = mês atual). Fale no tempo passado sobre esse mês, como se estivesse naquela época. Se "previsao_relevante" for false (mês já distante), os campos "recorrentes", "proximos_30_dias" e "recorrencia_mensal" NÃO existem e não são relevantes — não os cite nem especule sobre o futuro; foque apenas no mês analisado. Se for true (mês atual ou primeiros 15 dias do seguinte), pode usá-los."#;
+    let user = json!(payload.to_string());
+    let value = state
+        .ai
+        .chat_json(system, user, state.ai.text_model(), None, "digest")
+        .await
+        .map_err(AppError::from)?;
+
+    Ok(json!({
+        "ai": true,
+        "month": label,
+        "resumo": value.get("resumo").and_then(|v| v.as_str()).unwrap_or(""),
+        "destaques": value.get("destaques").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+        "avisos": value.get("avisos").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+    }))
 }
 
 pub async fn trend(
@@ -471,7 +827,9 @@ pub async fn expected(
     State(state): State<AppState>,
     Query(q): Query<ExpectedQuery>,
 ) -> Result<Json<ExpectedSpend>, AppError> {
-    Ok(Json(expected_data(&state.pool, q.date_from, q.date_to).await?))
+    Ok(Json(
+        expected_data(&state.pool, q.date_from, q.date_to).await?,
+    ))
 }
 
 pub async fn expected_data(
@@ -491,10 +849,16 @@ pub async fn expected_data(
     }
 
     let (installments, recurring) = future_events(pool, today, to).await?;
-    let installments_cents =
-        installments.iter().filter(|(d, _)| *d >= from).map(|(_, a)| a).sum::<i64>();
-    let recurring_cents =
-        recurring.iter().filter(|(d, _)| *d >= from).map(|(_, a)| a).sum::<i64>();
+    let installments_cents = installments
+        .iter()
+        .filter(|(d, _)| *d >= from)
+        .map(|(_, a)| a)
+        .sum::<i64>();
+    let recurring_cents = recurring
+        .iter()
+        .filter(|(d, _)| *d >= from)
+        .map(|(_, a)| a)
+        .sum::<i64>();
     Ok(ExpectedSpend {
         installments_cents,
         recurring_cents,
@@ -555,7 +919,8 @@ async fn future_events(
 
     let mut recurring = Vec::new();
     for (amount_cents, frequency, interval, next_due) in rules {
-        let mut d = crate::services::recurring::advance_next_due(next_due, &frequency, interval, today);
+        let mut d =
+            crate::services::recurring::advance_next_due(next_due, &frequency, interval, today);
         for _ in 0..1200 {
             if d > limit {
                 break;
@@ -574,8 +939,12 @@ fn step_occurrence(d: NaiveDate, frequency: &str, interval: i32) -> NaiveDate {
     let interval = interval.max(1) as u32;
     match frequency {
         "weekly" => d + chrono::Duration::days(7 * interval as i64),
-        "monthly" => d.checked_add_months(chrono::Months::new(interval)).unwrap_or(d),
-        _ => d.checked_add_months(chrono::Months::new(interval * 12)).unwrap_or(d),
+        "monthly" => d
+            .checked_add_months(chrono::Months::new(interval))
+            .unwrap_or(d),
+        _ => d
+            .checked_add_months(chrono::Months::new(interval * 12))
+            .unwrap_or(d),
     }
 }
 
@@ -600,14 +969,18 @@ pub async fn forecast(
     State(state): State<AppState>,
     Query(q): Query<ForecastQuery>,
 ) -> Result<Json<Vec<ForecastPoint>>, AppError> {
-    Ok(Json(forecast_data(&state.pool, q.months.unwrap_or(3)).await?))
+    Ok(Json(
+        forecast_data(&state.pool, q.months.unwrap_or(3)).await?,
+    ))
 }
 
 pub async fn forecast_data(pool: &PgPool, months: i32) -> Result<Vec<ForecastPoint>, AppError> {
     let months = months.clamp(1, 24);
     let today = chrono::Utc::now().date_naive();
     let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
-    let last_first = first.checked_add_months(chrono::Months::new(months as u32 - 1)).unwrap();
+    let last_first = first
+        .checked_add_months(chrono::Months::new(months as u32 - 1))
+        .unwrap();
     let limit = last_first + chrono::Months::new(1) - chrono::Duration::days(1);
 
     let (installments, recurring) = future_events(pool, today, limit).await?;
@@ -666,7 +1039,9 @@ pub async fn upcoming(
     State(state): State<AppState>,
     Query(q): Query<UpcomingQuery>,
 ) -> Result<Json<Vec<UpcomingItem>>, AppError> {
-    Ok(Json(upcoming_data(&state.pool, q.days.unwrap_or(90)).await?))
+    Ok(Json(
+        upcoming_data(&state.pool, q.days.unwrap_or(90)).await?,
+    ))
 }
 
 pub async fn upcoming_data(pool: &PgPool, days: i64) -> Result<Vec<UpcomingItem>, AppError> {
@@ -730,7 +1105,8 @@ pub async fn upcoming_data(pool: &PgPool, days: i64) -> Result<Vec<UpcomingItem>
     .fetch_all(pool)
     .await?;
     for (amount_cents, frequency, interval, next_due, name, category_name) in rules {
-        let mut d = crate::services::recurring::advance_next_due(next_due, &frequency, interval, today);
+        let mut d =
+            crate::services::recurring::advance_next_due(next_due, &frequency, interval, today);
         for _ in 0..1200 {
             if d > limit {
                 break;

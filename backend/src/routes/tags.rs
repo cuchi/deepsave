@@ -40,6 +40,45 @@ pub async fn usage(State(state): State<AppState>) -> Result<Json<Vec<TagUsage>>,
     Ok(Json(usage))
 }
 
+/// Registry entry: a tag with its user-written description ('' when none).
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct TagRegistryEntry {
+    pub name: String,
+    pub description: String,
+}
+
+/// `GET /api/tags/registry` — every tag in use (items + merchant memory) with its
+/// description, for the management UI and AI prompt context.
+pub async fn registry(State(state): State<AppState>) -> Result<Json<Vec<TagRegistryEntry>>, AppError> {
+    let rows: Vec<TagRegistryEntry> = sqlx::query_as::<_, TagRegistryEntry>(
+        "WITH used AS (
+           SELECT tag FROM items CROSS JOIN LATERAL unnest(tags) AS tag
+         )
+         SELECT u.tag AS name, COALESCE(t.description, '') AS description
+         FROM used u LEFT JOIN tags t ON t.name = u.tag
+         ORDER BY u.tag",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DescriptionInput {
+    pub description: String,
+}
+
+/// `PATCH /api/tags/{tag}` — set the description of a tag (created on demand).
+pub async fn set_description(
+    State(state): State<AppState>,
+    Path(tag): Path<String>,
+    Json(input): Json<DescriptionInput>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let tag = normalize_tag(&tag)?;
+    tags::upsert_description(&state.pool, &tag, input.description.trim()).await?;
+    Ok(Json(json!({ "ok": true, "tag": tag, "description": input.description.trim() })))
+}
+
 async fn apply_rename(
     state: &AppState,
     from: &str,
@@ -54,7 +93,6 @@ async fn apply_rename(
     Ok(Json(json!({
         "ok": true,
         "items_updated": res.items_updated,
-        "memory_updated": res.memory_updated,
     })))
 }
 
@@ -84,6 +122,5 @@ pub async fn delete_tag(
     Ok(Json(json!({
         "ok": true,
         "items_updated": res.items_updated,
-        "memory_updated": res.memory_updated,
     })))
 }

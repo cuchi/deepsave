@@ -12,14 +12,19 @@ use crate::AppState;
 #[derive(Debug, Deserialize)]
 pub struct CreateBatchInput {
     pub ids: Vec<Uuid>,
+    /// 'tags' (default) | 'categorize'
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
-/// `POST /ai-tags/batches` — enqueue AI tagging for the selected items.
+/// `POST /ai-tags/batches` — enqueue AI tagging (or categorization) for the
+/// selected items.
 pub async fn create_batch(
     State(state): State<AppState>,
     Json(input): Json<CreateBatchInput>,
 ) -> Result<Json<AiTagBatch>, AppError> {
-    Ok(Json(ai_tags::enqueue_batch(&state.pool, input.ids).await?))
+    let kind = input.kind.as_deref().unwrap_or("tags");
+    Ok(Json(ai_tags::enqueue_batch(&state.pool, input.ids, kind).await?))
 }
 
 /// `GET /ai-tags/batches` — recent batches (newest first).
@@ -27,11 +32,11 @@ pub async fn list_batches(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AiTagBatch>>, AppError> {
     let batches: Vec<AiTagBatch> = sqlx::query_as(
-        "SELECT b.id, b.status, b.error_message, b.created_at, b.processed_at,
+        "SELECT b.id, b.status, b.error_message, b.created_at, b.processed_at, b.kind,
                 count(s.id)::bigint AS item_count
          FROM ai_tag_batches b
          LEFT JOIN ai_tag_suggestions s ON s.batch_id = b.id
-         GROUP BY b.id
+         GROUP BY b.id, b.kind
          ORDER BY b.created_at DESC
          LIMIT 20",
     )
@@ -63,7 +68,8 @@ pub async fn list_suggestions_query(
     status: &str,
 ) -> Result<Vec<SuggestionDetail>, sqlx::Error> {
     sqlx::query_as::<_, SuggestionDetail>(sqlx::AssertSqlSafe(
-        "SELECT s.id, s.batch_id, b.status AS batch_status, s.item_id, s.suggested_tags,
+        "SELECT s.id, s.batch_id, b.status AS batch_status, b.kind AS batch_kind,
+                s.item_id, s.suggested_tags, s.suggested_category,
                 s.status, s.created_at,
                 i.merchant, i.description, i.amount_cents, i.occurred_on,
                 i.category_id, c.name AS category_name, i.tags, i.document_id

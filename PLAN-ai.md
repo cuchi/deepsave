@@ -1,176 +1,138 @@
-# Plan — AI features (v1.0)
+# Plan — AI features (v2, reframed)
 
 > Design doc for the AI-assisted features on top of the Pluggy-first data model.
-> Complements `PLAN.md` (remaining work) and `AGENTS.md` (conventions). Status:
-> **proposal** — not yet implemented.
+> Status: F0, F1, F2, F3, F10 implemented. This revision **refocuses the AI on
+> judgment** — see principle 2. F5 (refund AI) was dropped as a bad trade.
 
 ## 0. Why now / what we have
 
-The data is finally **clean and structured** (Pluggy items, categories/tags, merchant
-memory, recurring rules, refund links, purchase series). The old document-extraction AI
-is gone. That frees the AI budget for what it's actually good at: **judgment, not
-parsing**.
-
-Current AI surface (all works except the review UI):
-- **AI tagging** (`services/ai_tags.rs`): batch → DeepSeek proposes tags → suggestions
-  → apply/dismiss. The Revisar page that surfaced them was deleted in the decommission —
-  the flow is broken, but the machinery is intact and reusable.
-- **Merchant memory** (category + tags, `confirm_count ≥ 2` gating) — the few-shot
-  foundation for every feature below.
-- `AiClient` (chat JSON + vision), `ai_calls` token/cost accounting, background worker
-  pattern, `memory preview → apply` UX precedent.
+The data is clean and structured (Pluggy items, categories/tags, change log, recurring
+rules, refund links, series). The old document-extraction AI is gone. Current AI
+surface: inline tagging (F1), categorization (F2), monthly digest (F3), and the change
+log (F10) feeding `hist` into every prompt — plus `mcc`/`pluggy_category`/
+`operation_type` metadata and tag descriptions (F0).
 
 ## 1. Design principles
 
 1. **AI proposes, never mutates.** Every feature produces a *suggestion* the user
-   reviews and applies (inline in the list, not a separate page). Reuses the
-   `ai_tag_suggestions` pattern (batch row + suggestion rows + apply/dismiss + memory
-   feedback on apply).
-2. **Deterministic plumbing, AI at the edges.** Rules handle what they handle well
-   (dedup, series, refund linking, recurring aliases). AI fills the gaps: semantic
-   matching, classification, narrative.
-3. **Compact payloads, cost-conscious.** Batches capped (200 items), per-merchant
-   examples capped (3), stable system prefixes for prompt caching, every call recorded
-   in `ai_calls` (already the norm). pt-BR prompts.
-4. **Memory is the feedback loop.** Applying a proposal feeds `merchant_memory`
-   (category + tags) so the next batch gets smarter and the app gets less manual.
-5. **On-demand + scheduled.** Buttons for batch features; a monthly digest can run on
-   demand (and later on a timer).
-6. **The user teaches, the AI executes.** Tag descriptions (F0) and merchant memory
-   are the vocabulary the AI is told to use — every prompt injects them.
+   reviews and applies inline. Reuses the batch → suggestion → apply/dismiss pattern.
+2. **The SQL+template test — the reframing.** If a SQL query plus a template can
+   produce it, **don't spend an AI call on it**. AI earns its keep only where it
+   brings something rules can't:
+   - **world knowledge** (merchant → category, "what is this thing"),
+   - **fuzzy disambiguation** (same string = two different entities: a restaurant vs
+     a person; `IFD*iFood` ≡ `IFOOD.COM`),
+   - **interpretation with judgment** (not "spend +49%" but "one-off medical bill,
+     not budget creep"),
+   - **semantic consistency** (applying the user's tag meanings across merchants).
+   Everything else (aggregation, thresholds, exact matching, formatting) stays in
+   rules/templates — cheaper, deterministic, explainable.
+3. **Compact payloads, cost-conscious.** Batches capped, examples capped, stable
+   system prefixes for prompt caching, every call recorded in `ai_calls`.
+4. **The change log is the memory.** `change_log` (F10, `hist` per item) + tagged
+   examples (`ex`) are the user's ground truth — no merchant-memory table.
+5. **On-demand + scheduled.** Buttons for batch features; the digest can run on a
+   timer later.
+6. **The user teaches, the AI executes.** Tag descriptions (F0) + `hist` + `ex` are
+   the vocabulary every prompt is told to use.
 
 ## 2. Common architecture
 
 ```
-[enqueue] → ai_proposals (kind, status, created_at)
-         → worker: build compact payload → DeepSeek JSON → fill suggestions
-         → UI: inline review (apply/dismiss/apply-all)
-         → apply: mutate + update merchant_memory
+[enqueue] → ai_tag_batches (kind: tags | categorize | merchant | anomaly)
+         → worker: compact payload (hist/ex/metadata) → DeepSeek JSON → suggestions
+         → UI: inline review (apply/dismiss)
+         → apply: mutate + log to change_log
 ```
 
-- One new table `ai_proposals` generalizes `ai_tag_batches` with a `kind` column
-  (`tags | categorize | merchant | refund_link | anomaly | digest`); the existing
-  `ai_tag_suggestions` table gains `kind` too (or a parallel `ai_proposal_items`).
-  Plus the `tags` registry from F0. Migration 0018.
-- `services/ai_features.rs`: per-kind prompt builders + a shared worker
-  (`run_worker` mirrors `ai_tags::run_worker`).
-- Each kind defines its own **apply** semantics (see below). Applying always updates
-  `merchant_memory` when a category/tag is involved.
+- Batch/suggestion tables already carry `kind`; new kinds reuse the same machinery.
+- `services/ai_features.rs` (or per-kind modules): prompt builders + apply semantics.
+- Every apply writes to `change_log` (the durable memory).
 
-## 3. Features (ranked)
+## 3. Features (implemented)
 
-### Tier 1 — fix + quick wins
+- **F0 — Tag descriptions** ✅ (`tags` registry + prompt injection).
+- **F1 — Inline tagging** ✅ (amber chips, banner, "Só itens com sugestão").
+- **F2 — Smart categorization** ✅ (world knowledge; MCC rule as the deterministic
+  layer beneath it).
+- **F3 — Monthly digest** ✅ (cheap add-on; honest note: the *data* is rules — the AI
+  only picks the framing. Kept because it's one call/month and pleasant, not because
+  it's the AI's best use).
+- **F10 — Change log** ✅ (append-only history; `hist` in every prompt; the user's
+  curation as trajectory, not snapshot).
 
-#### F0. Tag descriptions — teach the AI (enabler)
-- A small **tags registry** table so every tag can carry a description the user
-  writes: `CREATE TABLE tags (name text PRIMARY KEY, description text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now())`.
-  (Future-proof: can later gain `color` — the long-deferred tag-color loose end.)
-- **Registry stays in sync** with the free-form tags on items/memory: rows are
-  upserted lazily when a new tag appears, and the existing rename/merge/delete
-  cascade (`services/tags.rs`) also updates the registry (rename carries the
-  description; merge unions into the target; delete removes the row).
-- **UI**: in the Memória page's Tags tab, each tag gets a description field ("o que
-  esse tag significa pra mim?"); hover on a tag chip in the list shows the
-  description.
-- **Prompt injection (the point)**: every AI feature includes the descriptions of
-  the tags in scope — the tagging/categorization prompts send `tag 'viagem' = "gastos
-  de viagem a trabalho"`, so the AI uses the user's vocabulary instead of guessing.
-  This is how the user "teaches" the assistant without writing rules.
-- Effort: small (schema + one endpoint + prompt builder change). Enables F1/F2 to be
-  much smarter from day one.
+## 4. Features (planned — reframed)
 
-#### F1. Rework AI tagging inline (fixes the broken flow)
-- Move suggestion review from the (deleted) Revisar page **into Lista**: a pending
-  suggestions bar ("N sugestões de tags — Ver/Aplicar todas") + per-row badge with
-  apply/dismiss. No new page.
-- Keep the current batch/worker/apply code; only the surface changes.
-- Effort: small. Unblocks everything else (memory feedback depends on applies).
+### F4. Merchant normalization — only the semantic part
 
-#### F2. Smart categorization (the big one)
-- Target: the **uncategorized items** (Pluggy imports leave ~600 without a mapped
-  category) + any item with no category.
-- Prompt: item (description, merchant, amount, date, installment) + memory few-shots
-  for that merchant + the active category list (name + parent). Output: category or
-  `"nova: <sugestão>"` or `null` (unclassifiable — transfers etc.).
-- Proposal per item; apply sets `category_id`, creates the category when "nova",
-  updates merchant memory (gated ≥ 2 confirmations like today).
-- Batch by merchant to keep payloads small and examples relevant.
-- Effort: medium (reuses tagging machinery + categories CRUD already exists).
-- Value: the single biggest UX win — the manual categorize grind disappears.
+- **Rules (already shipped)**: exact/token/`norm_key` merging handles `DIFATTO` vs
+  `DI FATTO`, spacing/case variants.
+- **AI (the legitimate part)**: clusters that rules *cannot* unify because the names
+  are semantically the same brand — `IFD*iFood` ≡ `IFOOD.COM` ≡ `IFOOD PAGO`, or
+  `EMERSON GOSS DA CRUZ` (restaurant) vs the person receiving Pix. AI proposes a
+  canonical merchant per cluster (world knowledge) + flags same-string-different-
+  entity collisions so the user decides.
+- Apply: rename `items.merchant` on the cluster (non-destructive, one click per
+  cluster). Feeds `hist` + recurring alias suggestions.
+- Effort: medium. Value: genuinely reduces duplicate-merchant noise that rules miss.
 
-#### F3. Monthly digest (delight, cheap)
-- On-demand button on Gráficos: aggregate the month (totals, by-category, top
-  merchants, new merchants, new subscriptions, upcoming obligations, anomalies) →
-  one DeepSeek call → pt-BR narrative paragraph(s) rendered as a card.
-- No new tables (computed from existing dashboard queries; store last digest in the
-  browser or a small `ai_digests` table).
-- Effort: small. High perceived value, near-zero risk.
+### F6. Anomaly alerts — rules detect, AI interprets
 
-### Tier 2 — medium effort, real payoff
+- **Rules (the real work)**: per-merchant and per-category baselines (median/std,
+  rolling window), flag > 2× typical or unusual frequency; deterministic, cheap.
+- **AI (the judgment)**: interprets the flagged set — "one-off medical bill" vs
+  "subscription creep" vs "seasonal" — and proposes an action ("vincular a
+  recorrente?", "rever assinatura"). The narrative is the *output of judgment*, not
+  a formatting step: the model sees the flagged items + history and says what the
+  user should *look at*.
+- Effort: medium (baseline SQL + one AI call for the interpretation).
 
-#### F4. Merchant normalization
-- We hit this during dedup: "EMERSONGOSSDACRUZ LAGES BRA" vs "EmersonGossDaCruz".
-  AI proposes a **canonical merchant name** per cluster (same tokens/amount range) —
-  e.g. renames the merchant on a group of items (and offers to seed a recurring
-  alias / memory key).
-- Proposal: cluster → suggested canonical name → apply renames `items.merchant`
-  (and offers merge into memory/recurring). Non-destructive (one-click per cluster).
-- Effort: medium. Value: cleaner list, better memory keys, fewer "duplicates" forever.
+### F11. Relationship classification (new — the strongest untapped case)
 
-#### F5. Refund-counterpart finder (semantic)
-- The token matcher leaves refunds unlinked when descriptions differ (LOCALIZA
-  +201.47). AI gets the refund + candidate charges (same account, ±90 days, amount
-  range) and proposes the link.
-- Proposal → apply sets `refunded_item_id` (existing netting kicks in).
-- Effort: small-medium. Closes a known gap; few items but the pattern recurs.
+- Monthly PIX/TED to the **same person** (counterparty CNPJ/CPF — 88% coverage) is a
+  *relationship*, not a category: rent, child support, business payouts, family help.
+- **Rules**: detect recurring same-counterparty transfers (frequency + stability).
+- **AI**: labels the relationship (world knowledge + name/amount patterns) and
+  proposes a tag + recurring rule ("aluguel" + monthly rule). Genuine judgment —
+  rules can't infer "this is rent".
+- Apply: sets tag + links/creates a recurring rule. Feeds `hist`.
+- Effort: medium. High value: the recurring/forecast layer gets smarter for free.
 
-#### F6. Anomaly / unexpected-spend alerts
-- Rule-based baseline first: per merchant and per category, compare current window vs
-  history (mean/std or median; flag > 2× typical or new merchants > threshold).
-- AI writes the narrative for flagged items: "IFOOD: R$ 340 este mês vs média R$ 120
-  — 4 compras novas" + optional action ("vincular a recorrente?").
-- On-demand button ("Analisar anomalias") + optionally after each sync.
-- Effort: medium (baseline SQL + one AI call for the narrative).
+### F7. Natural-language assistant (kept — genuinely useful)
 
-### Tier 3 — explore later
+- "quanto gastei em restaurantes em junho?" → AI maps to existing filter params as
+  JSON (deterministic); the app runs the query. The AI's value is mapping *language*
+  to the filter space — rules can't do that.
+- Effort: medium-high. Guard against over-scope.
 
-#### F7. Natural-language assistant
-- "quanto gastei em restaurantes em junho?" → DeepSeek maps to the **existing filter
-  params** (month, category_ids, tags, kind, date range) as JSON → the app runs the
-  query and shows the list/graphs. Structured output keeps it deterministic; the chat
-  is a small input in Gráficos/Lista.
-- Effort: medium-high (endpoint + UI + follow-up handling). High wow, guard against
-  over-scope.
+### Dropped
 
-#### F8. Subscription price tracking
-- Detect price deltas on recurring rules / merchant history ("Spotify 21,90 → 26,90"),
-  flag as a proposal/alert. Rule-based delta + AI confirmation of "same plan".
-- Effort: medium. Nice for the forecast/Previsão page.
+- **F5 (refund-counterpart AI)** — rules already solve the clean cases; the rare
+  ambiguous ones are higher-risk with AI (less explainable, wrong links hurt the
+  netting). Keep rules + the manual review; no AI call.
+- **F8 (subscription price tracking)** — rule-based delta is deterministic and
+  explainable; no AI needed (mark as a plain feature if wanted).
+- **F9 (essential × discretionary)** — borderline: a *single* AI call to label the
+  category set is defensible (world knowledge), then rules compute the split. Only
+  build if the user wants the 50/30/20 view; the AI part is one call.
 
-#### F9. Essential × discretionary classification
-- Per-category or per-merchant labels (essential/discretionary) → 50/30/20-style
-  breakdown + narrative. AI classifies the category set once (small call); the app
-  computes the split from items.
-- Effort: small-medium. Cool on Previsão.
-
-## 4. Out of scope (not now)
+## 5. Out of scope (not now)
 
 - Document/OCR/receipt extraction (decommissioned).
 - Investment advice, budgeting engines, multi-user anything.
 - Auto-mutation without review (everything stays proposal-based).
+- Any feature that fails the SQL+template test.
 
-## 5. Suggested order
+## 6. Suggested order
 
-1. **F1** (fix inline review) — unblocks applies + memory feedback.
-2. **F2** (categorization) — biggest practical win; burns down the uncategorized pile.
-3. **F3** (monthly digest) — cheap delight.
-4. **F5** (refund finder) + **F6** (anomalies) — close data gaps.
-5. **F4** (merchant normalization) — polish.
-6. **F7–F9** — explore after the pipeline is proven.
+1. **F4** (semantic merchant merging) — cleans the data the other features rely on.
+2. **F11** (relationship classification) — biggest genuine-judgment win.
+3. **F6** (anomaly interpretation) — rules first, AI interpretation second.
+4. **F7** (NL assistant) — explore when the pipeline is proven.
 
-## 6. Tests & accounting
+## 7. Tests & accounting
 
-- Each feature: unit tests for the prompt builder (payload shape) + an integration
-  test with wiremock for the apply path (like `tests/ai_tags.rs`).
-- All calls land in `ai_calls` (purpose = feature kind) — cost stays auditable.
-- Keep prompts pt-BR and stable (cacheable).
+- Each feature: unit tests for the prompt builder + a wiremock integration test for
+  the apply path (like `tests/ai_tags.rs`).
+- All calls land in `ai_calls` (purpose = feature kind).
+- Every apply logs to `change_log`.

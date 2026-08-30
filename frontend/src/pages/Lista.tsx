@@ -10,7 +10,7 @@ import {
   tagsApi,
   type BulkItemUpdateInput,
 } from '../api/client'
-import type { Item, RecurringRule } from '../lib/types'
+import type { Item, RecurringRule, SuggestionDetail } from '../lib/types'
 import { currentMonth, fmtCents } from '../lib/format'
 import ItemForm from '../components/ItemForm'
 import BulkEditModal from '../components/BulkEditModal'
@@ -73,6 +73,8 @@ export default function Lista() {
   const { data: categories = [] } = useQuery({ queryKey: ['categories'], queryFn: categoriesApi.list })
   const { data: banks = [] } = useQuery({ queryKey: ['banks'], queryFn: banksApi.list })
   const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: tagsApi.list })
+  const { data: tagRegistry = [] } = useQuery({ queryKey: ['tags-registry'], queryFn: tagsApi.registry })
+  const tagDesc = new Map(tagRegistry.map((r) => [r.name, r.description]))
   const { data: rules = [] } = useQuery({ queryKey: ['recurring'], queryFn: recurringApi.list })
 
   const { data: items = [], isLoading, isPlaceholderData } = useQuery({
@@ -151,21 +153,69 @@ export default function Lista() {
     },
   })
 
-  // AI bulk tagging: enqueue a background batch, then jump to the review page
-  // where the proposals land (apply = add tags to the item).
+  // AI bulk tagging: enqueue a background batch; proposals surface inline
+  // (banner + per-row ✨ chip) as soon as the worker finishes.
   const [aiTagError, setAiTagError] = useState('')
   const tagWithAi = useMutation({
-    mutationFn: (ids: string[]) => aiTagsApi.createBatch(ids),
+    mutationFn: (v: { ids: string[]; kind: 'tags' | 'categorize' }) =>
+      aiTagsApi.createBatch(v.ids, v.kind),
     onSuccess: () => {
       setSelected(new Set())
       setAiTagError('')
-      navigate('/review')
+      refetchAi()
     },
     onError: (e) => {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
       setAiTagError(msg ?? 'falha ao enfileirar tags')
     },
   })
+
+  // Pending tag suggestions (poll while any remain).
+  const [suggestionFor, setSuggestionFor] = useState<string | null>(null)
+  const [draftTags, setDraftTags] = useState<string[]>([])
+  const [draftInput, setDraftInput] = useState('')
+  const { data: aiSuggestions = [], refetch: refetchAi } = useQuery({
+    queryKey: ['ai-suggestions'],
+    queryFn: () => aiTagsApi.listSuggestions(),
+    refetchInterval: (query) => ((query.state.data?.length ?? 0) > 0 ? 6000 : false),
+  })
+  const sugByItem = new Map(aiSuggestions.map((s) => [s.item_id, s]))
+  const [suggestionsOnly, setSuggestionsOnly] = useState(false)
+  const visibleItems = suggestionsOnly ? items.filter((i) => sugByItem.has(i.id)) : items
+
+  const refreshAi = () => {
+    refetchAi()
+    qc.invalidateQueries({ queryKey: ['tags-registry'] })
+    qc.invalidateQueries({ queryKey: ['tags'] })
+    qc.invalidateQueries({ queryKey: ['items'] })
+  }
+  const applySug = useMutation({
+    mutationFn: (v: { id: string; tags: string[] }) => aiTagsApi.apply(v.id, v.tags),
+    onSuccess: () => {
+      setSuggestionFor(null)
+      refreshAi()
+    },
+  })
+  const dismissSug = useMutation({
+    mutationFn: aiTagsApi.dismiss,
+    onSuccess: () => {
+      setSuggestionFor(null)
+      refreshAi()
+    },
+  })
+  const applyAllSug = useMutation({ mutationFn: () => aiTagsApi.applyAll(), onSuccess: refreshAi })
+  const dismissAllSug = useMutation({ mutationFn: () => aiTagsApi.dismissAll(), onSuccess: refreshAi })
+
+  const openSuggestion = (s: SuggestionDetail) => {
+    setSuggestionFor(s.id)
+    setDraftTags([...s.suggested_tags])
+    setDraftInput('')
+  }
+  const addDraftTag = () => {
+    const t = draftInput.trim().toLowerCase()
+    if (t && !draftTags.includes(t)) setDraftTags((d) => [...d, t])
+    setDraftInput('')
+  }
 
   // Selection is scoped to what's currently visible: changing any filter resets
   // it (avoids accidentally bulk-editing hidden items).
@@ -186,18 +236,18 @@ export default function Lista() {
   const bankByDoc = new Map<string, string | undefined>()
 
   const byParent = new Map<string | null, Item[]>()
-  for (const it of items) {
+  for (const it of visibleItems) {
     const k = it.parent_id
     if (!byParent.has(k)) byParent.set(k, [])
     byParent.get(k)!.push(it)
   }
   const childSum = new Map<string, number>()
-  for (const it of items) {
+  for (const it of visibleItems) {
     if (it.parent_id) {
       childSum.set(it.parent_id, (childSum.get(it.parent_id) ?? 0) + Math.abs(it.amount_cents))
     }
   }
-  const roots = items.filter((i) => i.parent_id === null)
+  const roots = visibleItems.filter((i) => i.parent_id === null)
   const rootIds = roots.map((r) => r.id)
   const allSelected = roots.length > 0 && roots.every((r) => selected.has(r.id))
   const totalLabel = summary
@@ -243,6 +293,7 @@ export default function Lista() {
     const allocated = childSum.get(it.id) ?? 0
     const remainder = Math.abs(it.amount_cents) - allocated
     const legacy = !it.external_id && it.source !== 'pluggy'
+    const sug = sugByItem.get(it.id)
 
     return (
       <div key={it.id}>
@@ -325,11 +376,39 @@ export default function Lista() {
               {cat.name}
             </span>
           )}
+          {sug &&
+            (sug.batch_kind === 'categorize'
+              ? sug.suggested_category !== ''
+              : sug.suggested_tags.length > 0) && (
+              sug.batch_kind === 'categorize' ? (
+                <button
+                  onClick={() => openSuggestion(sug)}
+                  title="Categoria sugerida pela IA — toque para aplicar/ignorar"
+                  className="rounded border border-amber-500/50 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-amber-500/20"
+                >
+                  {sug.suggested_category}
+                </button>
+              ) : (
+                <span className="flex shrink-0 items-center gap-1">
+                  {sug.suggested_tags.slice(0, 3).map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => openSuggestion(sug)}
+                      title="Sugestão da IA — toque para aplicar/ignorar"
+                      className="rounded border border-amber-500/50 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-amber-500/20"
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </span>
+              )
+            )}
           {it.tags.length > 0 && (
             <span className="flex shrink-0 items-center gap-1">
               {it.tags.slice(0, 2).map((t) => (
                 <span
                   key={t}
+                  title={tagDesc.get(t)}
                   className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
                 >
                   {t}
@@ -344,6 +423,19 @@ export default function Lista() {
             {signOf(it.amount_cents)}
             {fmtCents(it.amount_cents)}
           </span>
+          {sug &&
+            (sug.batch_kind === 'categorize'
+              ? sug.suggested_category === ''
+              : sug.suggested_tags.length === 0) && (
+              <button
+                onClick={() => openSuggestion(sug)}
+                aria-label="Revisar sugestão da IA"
+                title="Sugestão da IA (vazia — toque para revisar)"
+                className="shrink-0 px-1.5 py-1 text-sm text-amber-400 hover:text-amber-200"
+              >
+                ✨
+              </button>
+            )}
           <button
             onClick={() => setMenuFor(open ? null : it.id)}
             aria-label="Ações do item"
@@ -404,6 +496,91 @@ export default function Lista() {
             </>
           )}
 
+          {suggestionFor === sugByItem.get(it.id)?.id && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setSuggestionFor(null)} />
+              <div className="absolute right-0 top-full z-20 mt-1 w-64 rounded border border-zinc-700 bg-zinc-900 py-2 shadow-xl">
+                {sugByItem.get(it.id)?.batch_kind === 'categorize' ? (
+                  <>
+                    <p className="px-3 pb-1.5 text-xs text-zinc-400">
+                      Categoria sugerida pela IA
+                    </p>
+                    <p className="px-3 pb-2 text-sm text-zinc-200">
+                      {sugByItem.get(it.id)?.suggested_category || '—'}
+                    </p>
+                    <div className="flex justify-end gap-2 border-t border-zinc-800 px-3 pt-2">
+                      <button
+                        onClick={() => dismissSug.mutate(suggestionFor)}
+                        disabled={dismissSug.isPending}
+                        className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500"
+                      >
+                        Ignorar
+                      </button>
+                      <button
+                        onClick={() => applySug.mutate({ id: suggestionFor, tags: [] })}
+                        disabled={applySug.isPending}
+                        className="rounded bg-amber-300 px-2 py-1 text-xs font-semibold text-amber-950 hover:bg-amber-200"
+                      >
+                        Aplicar
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="px-3 pb-1.5 text-xs text-zinc-400">
+                      Sugestão de tags da IA
+                    </p>
+                    <div className="flex flex-wrap gap-1 px-3 pb-2">
+                      {draftTags.length === 0 ? (
+                        <span className="text-xs text-zinc-600">nenhuma</span>
+                      ) : (
+                        draftTags.map((t) => (
+                          <span key={t} className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-300">
+                            {t}
+                            <button
+                              onClick={() => setDraftTags((d) => d.filter((x) => x !== t))}
+                              className="text-zinc-500 hover:text-zinc-200"
+                              title="remover"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 px-3 pb-2">
+                      <input
+                        value={draftInput}
+                        onChange={(e) => setDraftInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') addDraftTag()
+                        }}
+                        placeholder="+ tag"
+                        className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs outline-none focus:border-zinc-500"
+                      />
+                    </div>
+                    <div className="flex justify-end gap-2 border-t border-zinc-800 px-3 pt-2">
+                      <button
+                        onClick={() => dismissSug.mutate(suggestionFor)}
+                        disabled={dismissSug.isPending}
+                        className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500"
+                      >
+                        Ignorar
+                      </button>
+                      <button
+                        onClick={() => applySug.mutate({ id: suggestionFor, tags: draftTags })}
+                        disabled={applySug.isPending}
+                        className="rounded bg-amber-300 px-2 py-1 text-xs font-semibold text-amber-950 hover:bg-amber-200"
+                      >
+                        Aplicar
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+
           {linkFor === it.id && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setLinkFor(null)} />
@@ -457,6 +634,7 @@ export default function Lista() {
                 {it.tags.map((t) => (
                   <span
                     key={t}
+                    title={tagDesc.get(t)}
                     className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
                   >
                     {t}
@@ -489,7 +667,9 @@ export default function Lista() {
       <div className="mb-4 flex items-baseline gap-3">
         <h1 className="text-xl font-bold">Lista</h1>
         <p className="text-xs text-zinc-500">
-          Todo o histórico{summary ? ` — ${summary.count} itens` : ''}
+          {suggestionsOnly
+            ? `Mostrando apenas itens com sugestão (${roots.length})`
+            : `Todo o histórico${summary ? ` — ${summary.count} itens` : ''}`}
           {items.length >= LIST_LIMIT
             ? ` (exibindo máx. ${LIST_LIMIT}; use os filtros para refinar)`
             : ''}
@@ -506,6 +686,37 @@ export default function Lista() {
         searchPlaceholder="Buscar em todo o histórico…"
       />
 
+      {aiSuggestions.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          <span className="font-medium">✨ {aiSuggestions.length} sugestão(ões) da IA</span>
+          <label className="flex items-center gap-1.5 text-xs text-amber-300/80" title="Mostrar apenas os itens com sugestão pendente">
+            <input
+              type="checkbox"
+              checked={suggestionsOnly}
+              onChange={(e) => setSuggestionsOnly(e.target.checked)}
+              className="accent-amber-400"
+            />
+            Só itens com sugestão
+          </label>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => applyAllSug.mutate()}
+              disabled={applyAllSug.isPending}
+              className="rounded bg-amber-300 px-2.5 py-1 text-xs font-semibold text-amber-950 hover:bg-amber-200 disabled:opacity-50"
+            >
+              Aplicar todas
+            </button>
+            <button
+              onClick={() => dismissAllSug.mutate()}
+              disabled={dismissAllSug.isPending}
+              className="rounded border border-amber-500/50 px-2.5 py-1 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-50"
+            >
+              Ignorar todas
+            </button>
+          </div>
+        </div>
+      )}
+
       {selected.size > 0 && (
         <div className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-10 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-2xl border border-zinc-700 bg-zinc-900/95 px-4 py-2 text-sm shadow-2xl shadow-black/50 backdrop-blur sm:rounded-full sm:px-5 sm:pr-2">
           <span className="font-medium text-zinc-100">
@@ -518,12 +729,20 @@ export default function Lista() {
             Editar seleção
           </button>
           <button
-            onClick={() => tagWithAi.mutate([...selected])}
+            onClick={() => tagWithAi.mutate({ ids: [...selected], kind: 'tags' })}
             disabled={tagWithAi.isPending}
-            title="Enfileira a IA para sugerir tags para os itens selecionados (revise em Revisar)"
+            title="Enfileira a IA para sugerir tags para os itens selecionados (as sugestões aparecem aqui na lista)"
             className="rounded-full border border-amber-500/60 px-3 py-1.5 text-sm font-medium text-amber-300 hover:bg-amber-500/10 disabled:opacity-50"
           >
             {tagWithAi.isPending ? 'Enfileirando…' : 'Taggear com IA'}
+          </button>
+          <button
+            onClick={() => tagWithAi.mutate({ ids: [...selected], kind: 'categorize' })}
+            disabled={tagWithAi.isPending}
+            title="Enfileira a IA para sugerir a categoria dos itens selecionados"
+            className="rounded-full border border-cyan-500/60 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
+          >
+            {tagWithAi.isPending ? 'Enfileirando…' : 'Categorizar com IA'}
           </button>
           <button
             onClick={() => setSelected(new Set())}

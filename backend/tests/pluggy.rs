@@ -196,3 +196,49 @@ async fn assigns_installments_to_purchase_series(pool: sqlx::PgPool) {
     // Idempotent: a re-run assigns nothing new.
     assert_eq!(assign_installment_series(&pool).await.unwrap(), 0);
 }
+
+#[sqlx::test]
+async fn mcc_rule_categorizes_uncategorized_card_items(pool: sqlx::PgPool) {
+    common::migrate(&pool).await;
+    use deepsave_backend::services::mcc;
+
+    // A supermarket MCC and an unknown one.
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, mcc)
+         VALUES ('pluggy', 'expense', 'confirmed', '2026-07-01', 'SUPERMERCADO X', -5000, 5411)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, mcc)
+         VALUES ('pluggy', 'expense', 'confirmed', '2026-07-02', 'COISA ESTRANHA', -1000, 9999)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // An item that already has a category must not be touched.
+    sqlx::query(
+        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents, mcc, category_id)
+         VALUES ('pluggy', 'expense', 'confirmed', '2026-07-03', 'JA CATEGORIZADO', -2000, 5411,
+                 (SELECT id FROM categories WHERE name = 'Lazer'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(mcc::apply_mcc_categories(&pool).await.unwrap(), 1);
+
+    let (cat1, cat2): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT c.name FROM categories c JOIN items i ON c.id = i.category_id WHERE i.description = 'SUPERMERCADO X'),
+                (SELECT c.name FROM categories c JOIN items i ON c.id = i.category_id WHERE i.description = 'COISA ESTRANHA')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cat1.as_deref(), Some("Supermercado"));
+    assert_eq!(cat2, None);
+
+    // Idempotent.
+    assert_eq!(mcc::apply_mcc_categories(&pool).await.unwrap(), 0);
+}

@@ -196,6 +196,14 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/items/summary", get(routes::items::items_summary))
         .route("/tags", get(routes::tags::list))
         .route("/tags/usage", get(routes::tags::usage))
+        .route("/tags/registry", get(routes::tags::registry))
+        .route("/tags/{tag}", patch(routes::tags::set_description))
+        .route("/change-log", get(routes::change_log::list))
+        .route(
+            "/diary",
+            get(routes::diary::list).post(routes::diary::create),
+        )
+        .route("/diary/{id}", patch(routes::diary::update).delete(routes::diary::delete))
         .route("/tags/rename", patch(routes::tags::rename))
         .route("/tags/merge", post(routes::tags::merge))
         .route("/tags/{tag}", delete(routes::tags::delete_tag))
@@ -214,16 +222,8 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/items/{id}/confirm", post(routes::items::confirm))
         .route("/items/{id}/reject", post(routes::items::reject))
         .route("/items/{id}/link-recurring", post(routes::items::link_recurring))
-        .route("/items/{id}/apply-memory", post(routes::items::apply_memory))
         .route("/items/{id}/accept-suggestion", post(routes::items::accept_suggestion))
         .route("/banks", get(routes::items::banks))
-        .route("/memory", get(routes::memory::list_memory).post(routes::memory::create_memory))
-        .route(
-            "/memory/{id}",
-            patch(routes::memory::update_memory).delete(routes::memory::delete_memory),
-        )
-        .route("/memory/preview", post(routes::memory::preview))
-        .route("/memory/apply", post(routes::memory::apply))
         .route(
             "/recurring",
             get(routes::recurring::list).post(routes::recurring::create),
@@ -243,6 +243,12 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/dashboard/expected", get(routes::dashboard::expected))
         .route("/dashboard/forecast", get(routes::dashboard::forecast))
         .route("/dashboard/upcoming", get(routes::dashboard::upcoming))
+        .route(
+            "/dashboard/digest",
+            get(routes::dashboard::digest_get)
+                .post(routes::dashboard::digest_post)
+                .delete(routes::dashboard::digest_delete),
+        )
         .route("/system", get(routes::system::system))
         .route("/pluggy/status", get(routes::pluggy::status))
         .route("/pluggy/accounts", get(routes::pluggy::accounts))
