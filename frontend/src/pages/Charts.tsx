@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Link, useLocation } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   banksApi,
@@ -12,7 +12,7 @@ import {
   type TagTotal,
   type TrendPoint,
 } from '../api/client'
-import { currentMonth, fmtCents } from '../lib/format'
+import { currentMonth, currentMonthRange, fmtCents } from '../lib/format'
 import ItemFilters, { useFiltersUrl, type ItemFiltersValue } from '../components/ItemFilters'
 import EChart, { type EChartsCoreOption } from '../components/EChart'
 
@@ -415,9 +415,23 @@ function daysInRange(from: string, to: string): string[] {
 
 export default function Charts() {
   const location = useLocation()
-  const [graphsOpen, setGraphsOpen] = useState(true)
+  const [searchParams] = useSearchParams()
+  // The monthly summary lives behind the header button (same spot where the
+  // Gerar/Regenerar button is); it only renders while this is open.
+  const [summaryOpen, setSummaryOpen] = useState(false)
   const { filters, setFilters } = useFiltersUrl()
   const qc = useQueryClient()
+
+  // Pre-select the current month when landing here with an empty URL (no
+  // filters at all). Any params — shared/bookmarked links, existing
+  // filters — win and are left untouched.
+  useEffect(() => {
+    if (searchParams.size === 0) {
+      const r = currentMonthRange()
+      setFilters({ ...filters, dateFrom: r.from, dateTo: r.to }, { replace: true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // The digest only exists for exactly one full calendar month: the filter
   // range must start on the 1st and end on the last day of the same month.
@@ -429,6 +443,12 @@ export default function Charts() {
     return to === `${ym}-${String(last).padStart(2, '0')}`
   }
   const digestMonth = isFullMonth(filters.dateFrom, filters.dateTo) ? filters.dateFrom.slice(0, 7) : null
+
+  // Without a single full month selected there is nothing to summarize — drop
+  // the open panel (and its header button disappears on its own).
+  useEffect(() => {
+    if (!digestMonth) setSummaryOpen(false)
+  }, [digestMonth])
 
   // Read the saved digest (no AI call).
   const { data: digest, isFetching: digestLoading } = useQuery({
@@ -445,6 +465,16 @@ export default function Charts() {
     mutationFn: (m: string) => dashboardApi.digestDelete(m),
     onSuccess: (_r, m) => qc.setQueryData(['digest', m], { ai: true, month: m, saved: false }),
   })
+
+  // Header button: no summary yet → generate (and open the panel when done);
+  // summary exists → toggle the panel.
+  const toggleSummary = () => {
+    if (digest?.resumo) {
+      setSummaryOpen((o) => !o)
+    } else if (digestMonth) {
+      generateDigest.mutate(digestMonth, { onSuccess: () => setSummaryOpen(true) })
+    }
+  }
 
   const { data: categories = [] } = useQuery({ queryKey: ['categories'], queryFn: categoriesApi.list })
   const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: tagsApi.list })
@@ -514,49 +544,78 @@ export default function Charts() {
         {digestMonth && (
           <span className="flex items-center gap-2">
             <button
-              onClick={() => generateDigest.mutate(digestMonth)}
+              onClick={toggleSummary}
               disabled={digestLoading || generateDigest.isPending}
               className="rounded border border-cyan-500/50 px-2.5 py-1 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
-              title="Gera um resumo em português do mês usando IA (pode ser regenerado a qualquer momento)"
+              title="Mostra/esconde o resumo mensal gerado por IA (pode ser regenerado a qualquer momento)"
             >
-              {generateDigest.isPending ? 'Gerando…' : digest?.saved ? '🔄 Regenerar' : 'Gerar resumo (IA)'}
+              {generateDigest.isPending
+                ? 'Gerando…'
+                : digest?.resumo
+                  ? `📄 Resumo mensal ${summaryOpen ? '▾' : '▸'}`
+                  : '✨ Gerar resumo (IA)'}
             </button>
-            {digest?.saved && (
-              <>
-                <span className="text-xs text-zinc-500">salvo em {fmtUpdatedAt(digest.updated_at)}</span>
-                <button
-                  onClick={() => deleteDigest.mutate(digestMonth)}
-                  className="text-xs text-zinc-500 hover:text-red-400"
-                  title="Apaga o resumo salvo deste mês"
-                >
-                  Apagar
-                </button>
-              </>
-            )}
           </span>
         )}
       </div>
 
-      {digestMonth && digest?.saved && digest.resumo && (
+      {digestMonth && summaryOpen && (
         <div className="mb-4 rounded border border-zinc-700 bg-zinc-900 px-4 py-3">
-          <div className="mb-1 flex items-baseline gap-2">
-            <h2 className="text-sm font-semibold text-zinc-200">Resumo de {digest.month}</h2>
-            <span className="text-xs text-zinc-500">gerado por IA · salvo em {fmtUpdatedAt(digest.updated_at)}</span>
-          </div>
-          {digest.resumo && <p className="text-sm leading-relaxed text-zinc-300">{digest.resumo}</p>}
-          {digest.destaques && digest.destaques.length > 0 && (
-            <ul className="mt-2 list-disc space-y-0.5 pl-4 text-sm text-zinc-400">
-              {digest.destaques.map((d, i) => (
-                <li key={i}>{d}</li>
-              ))}
-            </ul>
-          )}
-          {digest.avisos && digest.avisos.length > 0 && (
-            <ul className="mt-2 list-disc space-y-0.5 pl-4 text-sm text-amber-300/90">
-              {digest.avisos.map((a, i) => (
-                <li key={i}>⚠ {a}</li>
-              ))}
-            </ul>
+          {digest?.resumo ? (
+            <>
+              <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <h2 className="text-sm font-semibold text-zinc-200">Resumo de {digest.month}</h2>
+                <span className="text-xs text-zinc-500">
+                  gerado por IA · salvo em {fmtUpdatedAt(digest.updated_at)}
+                </span>
+                <span className="ml-auto flex items-center gap-3">
+                  <button
+                    onClick={() => generateDigest.mutate(digestMonth)}
+                    disabled={generateDigest.isPending}
+                    className="text-xs text-cyan-300 hover:text-cyan-200 disabled:opacity-50"
+                    title="Regenera o resumo do mês (substitui o salvo)"
+                  >
+                    {generateDigest.isPending ? 'Gerando…' : '🔄 Regenerar'}
+                  </button>
+                  <button
+                    onClick={() => deleteDigest.mutate(digestMonth)}
+                    className="text-xs text-zinc-500 hover:text-red-400"
+                    title="Apaga o resumo salvo deste mês"
+                  >
+                    Apagar
+                  </button>
+                </span>
+              </div>
+              <p className="text-sm leading-relaxed text-zinc-300">{digest.resumo}</p>
+              {digest.destaques && digest.destaques.length > 0 && (
+                <ul className="mt-2 list-disc space-y-0.5 pl-4 text-sm text-zinc-400">
+                  {digest.destaques.map((d, i) => (
+                    <li key={i}>{d}</li>
+                  ))}
+                </ul>
+              )}
+              {digest.avisos && digest.avisos.length > 0 && (
+                <ul className="mt-2 list-disc space-y-0.5 pl-4 text-sm text-amber-300/90">
+                  {digest.avisos.map((a, i) => (
+                    <li key={i}>⚠ {a}</li>
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm text-zinc-400">
+                Nenhum resumo salvo para{' '}
+                <span className="text-zinc-200">{digestMonth}</span>.
+              </p>
+              <button
+                onClick={() => generateDigest.mutate(digestMonth)}
+                disabled={generateDigest.isPending}
+                className="rounded border border-cyan-500/50 px-2.5 py-1 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
+              >
+                {generateDigest.isPending ? 'Gerando…' : '✨ Gerar resumo (IA)'}
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -571,15 +630,8 @@ export default function Charts() {
       />
 
       <div className="mb-4 rounded border border-zinc-800 bg-zinc-900">
-        <button
-          onClick={() => setGraphsOpen(!graphsOpen)}
-          className="flex w-full items-center gap-2 px-4 py-3 text-sm font-medium"
-        >
-          Gráficos
-          <span className="ml-auto text-zinc-500">{graphsOpen ? '▾' : '▸'}</span>
-        </button>
-        {graphsOpen && (
-          <div className="space-y-4 border-t border-zinc-800 p-4">
+        <div className="flex items-center gap-2 px-4 py-3 text-sm font-medium">Gráficos</div>
+        <div className="space-y-4 border-t border-zinc-800 p-4">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
                 <p className="text-xs text-zinc-500">Despesas</p>
@@ -681,7 +733,6 @@ export default function Charts() {
               </Link>
             </p>
           </div>
-        )}
       </div>
     </div>
   )

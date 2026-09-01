@@ -119,7 +119,8 @@ function MonthGrid({
 
 export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
   const [open, setOpen] = useState(false)
-  const [mode, setMode] = useState<'days' | 'months'>('days')
+  // Month-focused by default: navigating between full months is the main flow.
+  const [mode, setMode] = useState<'days' | 'months'>('months')
   const [view, setView] = useState(() => {
     const base = dateFrom || toIso(new Date())
     return { y: Number(base.slice(0, 4)), m: Number(base.slice(5, 7)) - 1 }
@@ -128,13 +129,11 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
   const [start, setStart] = useState(dateFrom)
   const [end, setEnd] = useState(dateTo)
   const [hover, setHover] = useState<string | null>(null)
-  const [hoverMonth, setHoverMonth] = useState<string | null>(null)
 
   const openPopup = () => {
     setStart(dateFrom)
     setEnd(dateTo)
     setHover(null)
-    setHoverMonth(null)
     const base = dateFrom || toIso(new Date())
     setView({ y: Number(base.slice(0, 4)), m: Number(base.slice(5, 7)) - 1 })
     setYear(Number(base.slice(0, 4)))
@@ -153,20 +152,38 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
     }
   }
 
-  // Month-level selection: start = 1st day, end = last day of the chosen months.
-  const clickMonth = (ym: string) => {
+  /** YYYY-MM of the current selection when it is exactly one full calendar
+   *  month (1st to last day), otherwise null. */
+  const fullMonth = (): string | null => {
+    if (!start || !end) return null
+    const ym = start.slice(0, 7)
+    if (ym !== end.slice(0, 7) || start !== `${ym}-01` || end !== lastDay(ym)) return null
+    return ym
+  }
+
+  const stepMonth = (ym: string, delta: number): string => {
     const [y, m] = ym.split('-').map(Number)
-    if (!start || end) {
-      setStart(`${ym}-01`)
-      setEnd('')
-    } else if (ym < start.slice(0, 7)) {
-      setStart(`${ym}-01`)
-      setEnd(lastDay(start.slice(0, 7)))
-    } else {
-      setEnd(lastDay(ym))
-    }
+    const d = new Date(y, m - 1 + delta, 1)
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
+  }
+
+  /** Select one full calendar month and apply it immediately. */
+  const applyFullMonth = (ym: string) => {
+    const [y, m] = ym.split('-').map(Number)
+    const from = `${ym}-01`
+    const to = lastDay(ym)
+    setStart(from)
+    setEnd(to)
     setView({ y, m: m - 1 })
     setYear(y)
+    onChange(from, to)
+  }
+
+  // Month mode is pick-one-month: a single click selects that full calendar
+  // month (1st to last day) and applies it immediately. Custom ranges (incl.
+  // multi-month) use the "Dias" tab.
+  const clickMonth = (ym: string) => {
+    applyFullMonth(ym)
   }
 
   const apply = () => {
@@ -186,7 +203,6 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
   const switchMode = (m: 'days' | 'months') => {
     setMode(m)
     setHover(null)
-    setHoverMonth(null)
   }
 
   const label = !dateFrom && !dateTo
@@ -299,10 +315,11 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
                       </button>
                     </div>
                   ) : (
-                    <div className="flex items-center">
+                    <div className="flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => setYear((y) => y - 1)}
+                        title="Ano anterior"
                         className="px-2 text-zinc-400 hover:text-zinc-100"
                       >
                         ‹
@@ -311,10 +328,38 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
                       <button
                         type="button"
                         onClick={() => setYear((y) => y + 1)}
+                        title="Próximo ano"
                         className="px-2 text-zinc-400 hover:text-zinc-100"
                       >
                         ›
                       </button>
+                      {fullMonth() && (
+                        <>
+                          <span className="mx-1 h-4 w-px bg-zinc-700" />
+                          <button
+                            type="button"
+                            onClick={() => applyFullMonth(stepMonth(fullMonth()!, -1))}
+                            title="Mês anterior"
+                            className="px-2 text-zinc-400 hover:text-zinc-100"
+                          >
+                            ‹
+                          </button>
+                          <span className="text-xs capitalize text-zinc-400">
+                            {monthName(
+                              Number(fullMonth()!.slice(0, 4)),
+                              Number(fullMonth()!.slice(5, 7)) - 1,
+                            )}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => applyFullMonth(stepMonth(fullMonth()!, 1))}
+                            title="Próximo mês"
+                            className="px-2 text-zinc-400 hover:text-zinc-100"
+                          >
+                            ›
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -344,27 +389,16 @@ export default function PeriodPicker({ dateFrom, dateTo, onChange }: Props) {
                   <div className="grid grid-cols-3 gap-1">
                     {MONTHS_SHORT.map((name, i) => {
                       const ym = `${year}-${pad(i + 1)}`
-                      const isSel = ym === startYm || ym === endYm
-                      const inSel = startYm && endYm && ym > startYm && ym < endYm
-                      const inHover =
-                        startYm &&
-                        !endYm &&
-                        hoverMonth &&
-                        ym !== startYm &&
-                        ((ym > startYm && ym < hoverMonth) || (ym < startYm && ym > hoverMonth))
+                      const isSel = ym === startYm && ym === endYm
                       return (
                         <button
                           key={ym}
                           type="button"
                           onClick={() => clickMonth(ym)}
-                          onMouseEnter={() => setHoverMonth(ym)}
-                          onMouseLeave={() => setHoverMonth(null)}
                           className={`flex h-9 items-center justify-center rounded text-xs transition-colors ${
                             isSel
                               ? 'bg-zinc-100 font-semibold text-zinc-900'
-                              : inSel || inHover
-                                ? 'bg-zinc-700/70 text-zinc-100'
-                                : 'text-zinc-300 hover:bg-zinc-800'
+                              : 'text-zinc-300 hover:bg-zinc-800'
                           }`}
                         >
                           {name}

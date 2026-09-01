@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import type { Category } from '../lib/types'
 import PeriodPicker from './PeriodPicker'
@@ -231,6 +231,14 @@ function fmtDay(ymd: string): string {
   return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`
 }
 
+function FunnelIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="currentColor" aria-hidden>
+      <path d="M1.6 2.2h12.8a.55.55 0 0 1 .45.87L9.9 9.26v3.94a.7.7 0 0 1-.4.63l-2.6 1.2a.7.7 0 0 1-1-.63V9.26L1.15 3.07a.55.55 0 0 1 .45-.87Z" />
+    </svg>
+  )
+}
+
 export default function ItemFilters({
   value,
   onChange,
@@ -240,6 +248,17 @@ export default function ItemFilters({
   showSort = false,
   searchPlaceholder = 'Buscar…',
 }: Props) {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+
   // Active filters, as removable chips ("Limpar todos" resets everything).
   const active: { key: string; label: string; clear: () => void }[] = []
 
@@ -304,112 +323,178 @@ export default function ItemFilters({
     })
   }
 
+  // Badge on the "Filtros" button counts only what lives inside the popover
+  // (the search box is visible in the bar, so it'd just be noise).
+  const popoverCount = active.filter((c) => c.key !== 'q').length
+
   return (
     <>
-      <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="sm:col-span-2 lg:col-span-4">
-          <FieldLabel>Buscar</FieldLabel>
-          <input
-            value={value.search}
-            onChange={(e) => onChange(set(value, { search: e.target.value }), { replace: true })}
-            placeholder={searchPlaceholder}
-            className="field"
-          />
-        </div>
-
-        <PeriodPicker
-          dateFrom={value.dateFrom}
-          dateTo={value.dateTo}
-          onChange={(from, to, opts) => onChange(set(value, { dateFrom: from, dateTo: to }), opts)}
-        />
-
-        <MultiSelect
-          label="Categorias"
-          emptyLabel="Todas"
-          options={[
-            { value: NO_FILTER, label: 'Sem categoria' },
-            ...categories.map((c) => ({ value: c.id, label: c.name })),
-          ]}
-          selected={value.categoryIds}
-          onToggle={(id) =>
-            onChange(
-              set(value, {
-                categoryIds: value.categoryIds.includes(id)
-                  ? value.categoryIds.filter((x) => x !== id)
-                  : [...value.categoryIds, id],
-              }),
-            )
-          }
-        />
-
-        <MultiSelect
-          label="Tags"
-          emptyLabel="Todas"
-          options={[
-            { value: NO_FILTER, label: 'Sem tags' },
-            ...allTags.map((t) => ({ value: t, label: t })),
-          ]}
-          selected={value.tagFilter}
-          onToggle={(t) =>
-            onChange(
-              set(value, {
-                tagFilter: value.tagFilter.includes(t)
-                  ? value.tagFilter.filter((x) => x !== t)
-                  : [...value.tagFilter, t],
-              }),
-            )
-          }
-        />
-
-        <div>
-          <FieldLabel>Banco</FieldLabel>
-          <select
-            value={value.bankFilter}
-            onChange={(e) => onChange(set(value, { bankFilter: e.target.value }))}
-            className="field"
-          >
-            <option value="">Todos</option>
-            {banks.map((b) => (
-              <option key={b} value={b}>
-                {BANK_LABELS[b] ?? b}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {showSort && (
-          <div>
-            <FieldLabel>Ordenar</FieldLabel>
-            <select
-              value={value.sortBy}
-              onChange={(e) => onChange(set(value, { sortBy: e.target.value }))}
-              className="field"
-            >
-              <option value="date">Data</option>
-              <option value="value">Valor</option>
-            </select>
+      <div className="relative z-30 mb-4">
+        {/* Bar: search always visible + popover toggle */}
+        <div className="relative z-20 flex items-center gap-2">
+          <div className="relative min-w-0 flex-1">
+            <input
+              value={value.search}
+              onChange={(e) => onChange(set(value, { search: e.target.value }), { replace: true })}
+              placeholder={searchPlaceholder}
+              className="field w-full pr-8"
+            />
+            {value.search && (
+              <button
+                type="button"
+                onClick={() => onChange(set(value, { search: '' }), { replace: true })}
+                title="Limpar busca"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 transition-colors hover:text-zinc-100"
+              >
+                ×
+              </button>
+            )}
           </div>
+          <button
+            type="button"
+            onClick={() => setOpen(!open)}
+            aria-expanded={open}
+            className={`flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+              open
+                ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
+                : popoverCount > 0
+                  ? 'border-zinc-600 bg-zinc-800/60 text-zinc-100 hover:bg-zinc-800'
+                  : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100'
+            }`}
+          >
+            <FunnelIcon />
+            Filtros
+            {popoverCount > 0 && (
+              <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-bold leading-none text-zinc-900">
+                {popoverCount}
+              </span>
+            )}
+            <span className={`shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`}>
+              ▾
+            </span>
+          </button>
+        </div>
+
+        {open && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+            <div className="absolute left-0 right-0 top-full z-20 mt-2 rounded-lg border border-zinc-700 bg-zinc-900 p-4 shadow-2xl">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <PeriodPicker
+                  dateFrom={value.dateFrom}
+                  dateTo={value.dateTo}
+                  onChange={(from, to, opts) => onChange(set(value, { dateFrom: from, dateTo: to }), opts)}
+                />
+
+                <MultiSelect
+                  label="Categorias"
+                  emptyLabel="Todas"
+                  options={[
+                    { value: NO_FILTER, label: 'Sem categoria' },
+                    ...categories.map((c) => ({ value: c.id, label: c.name })),
+                  ]}
+                  selected={value.categoryIds}
+                  onToggle={(id) =>
+                    onChange(
+                      set(value, {
+                        categoryIds: value.categoryIds.includes(id)
+                          ? value.categoryIds.filter((x) => x !== id)
+                          : [...value.categoryIds, id],
+                      }),
+                    )
+                  }
+                />
+
+                <MultiSelect
+                  label="Tags"
+                  emptyLabel="Todas"
+                  options={[
+                    { value: NO_FILTER, label: 'Sem tags' },
+                    ...allTags.map((t) => ({ value: t, label: t })),
+                  ]}
+                  selected={value.tagFilter}
+                  onToggle={(t) =>
+                    onChange(
+                      set(value, {
+                        tagFilter: value.tagFilter.includes(t)
+                          ? value.tagFilter.filter((x) => x !== t)
+                          : [...value.tagFilter, t],
+                      }),
+                    )
+                  }
+                />
+
+                <div>
+                  <FieldLabel>Banco</FieldLabel>
+                  <select
+                    value={value.bankFilter}
+                    onChange={(e) => onChange(set(value, { bankFilter: e.target.value }))}
+                    className="field"
+                  >
+                    <option value="">Todos</option>
+                    {banks.map((b) => (
+                      <option key={b} value={b}>
+                        {BANK_LABELS[b] ?? b}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {showSort && (
+                  <div>
+                    <FieldLabel>Ordenar</FieldLabel>
+                    <select
+                      value={value.sortBy}
+                      onChange={(e) => onChange(set(value, { sortBy: e.target.value }))}
+                      className="field"
+                    >
+                      <option value="date">Data</option>
+                      <option value="value">Valor</option>
+                    </select>
+                  </div>
+                )}
+
+                <div className="sm:col-span-2">
+                  <FieldLabel>Tipo</FieldLabel>
+                  <Segmented
+                    options={KIND_OPTIONS}
+                    value={value.kindFilter}
+                    onSelect={(v) => onChange(set(value, { kindFilter: v }))}
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <FieldLabel>Parcelas</FieldLabel>
+                  <Segmented
+                    options={INSTALLMENT_OPTIONS}
+                    value={value.installments}
+                    onSelect={(v) =>
+                      onChange(set(value, { installments: v as 'all' | 'first_only' | 'only' }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="mt-3 flex items-center justify-between border-t border-zinc-800 pt-3">
+                <span className="text-xs text-zinc-500">
+                  {popoverCount === 0
+                    ? 'Nenhum filtro ativo'
+                    : `${popoverCount} filtro${popoverCount > 1 ? 's' : ''} ativo${popoverCount > 1 ? 's' : ''}`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChange(emptyFilters(), { replace: true })
+                    setOpen(false)
+                  }}
+                  className="text-xs text-zinc-500 hover:text-red-400"
+                >
+                  Limpar todos
+                </button>
+              </div>
+            </div>
+          </>
         )}
-
-        <div className="sm:col-span-2">
-          <FieldLabel>Tipo</FieldLabel>
-          <Segmented
-            options={KIND_OPTIONS}
-            value={value.kindFilter}
-            onSelect={(v) => onChange(set(value, { kindFilter: v }))}
-          />
-        </div>
-
-        <div className="sm:col-span-2">
-          <FieldLabel>Parcelas</FieldLabel>
-          <Segmented
-            options={INSTALLMENT_OPTIONS}
-            value={value.installments}
-            onSelect={(v) =>
-              onChange(set(value, { installments: v as 'all' | 'first_only' | 'only' }))
-            }
-          />
-        </div>
       </div>
 
       {active.length > 0 && (

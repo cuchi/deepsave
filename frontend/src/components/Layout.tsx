@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, Outlet, useNavigate } from 'react-router-dom'
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { authApi } from '../api/client'
 
@@ -15,7 +15,13 @@ const NAV_LINKS = [
 export default function Layout() {
   const qc = useQueryClient()
   const nav = useNavigate()
+  const location = useLocation()
   const [menuOpen, setMenuOpen] = useState(false)
+
+  // Keep the current query string when navigating between pages, so the
+  // filters set on the Lista/Gráficos pages survive switching back and forth
+  // (other pages ignore the params, so carrying them along is harmless).
+  const withParams = (to: string) => `${to}${location.search}`
 
   const logout = async () => {
     await authApi.logout()
@@ -31,7 +37,7 @@ export default function Layout() {
         <div className="flex items-center justify-between gap-2 px-4 py-3 sm:px-6">
           <div className="flex min-w-0 items-center gap-4">
             <Link
-              to="/"
+              to={withParams('/')}
               onClick={closeMenu}
               className="shrink-0 text-lg font-bold tracking-tight"
             >
@@ -40,7 +46,7 @@ export default function Layout() {
             {/* Desktop nav */}
             <nav className="hidden items-center gap-4 text-sm text-zinc-400 lg:flex">
               {NAV_LINKS.map((l) => (
-                <Link key={l.to} to={l.to} className="whitespace-nowrap hover:text-zinc-100">
+                <Link key={l.to} to={withParams(l.to)} className="whitespace-nowrap hover:text-zinc-100">
                   {l.label}
                 </Link>
               ))}
@@ -70,7 +76,7 @@ export default function Layout() {
             {NAV_LINKS.map((l) => (
               <Link
                 key={l.to}
-                to={l.to}
+                to={withParams(l.to)}
                 onClick={closeMenu}
                 className="block rounded-md px-3 py-2.5 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
               >
