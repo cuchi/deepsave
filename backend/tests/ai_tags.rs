@@ -160,7 +160,9 @@ async fn process_batch_fills_suggestions_from_ai(pool: PgPool) {
     ai_tags::process_batch(&pool, &ai, batch.id).await.unwrap();
 
     assert_eq!(suggestion_tags(&pool, batch.id, a).await, vec!["padaria", "cafe da manha"]);
-    assert_eq!(suggestion_tags(&pool, batch.id, b).await, vec!["saude", "remedio"]);
+    // "saude" collides with the fixture's "Saúde" category — the collision
+    // filter drops it (tags must not repeat categories).
+    assert_eq!(suggestion_tags(&pool, batch.id, b).await, vec!["remedio"]);
     // Untouched by the model: stays empty.
     assert_eq!(suggestion_tags(&pool, batch.id, c).await, Vec::<String>::new());
 
@@ -215,7 +217,7 @@ async fn apply_adds_tags_and_marks_applied(pool: PgPool) {
     .unwrap();
 
     // Apply with an edited tag list (user removed "PÃO" and added "fim de semana").
-    let res = ai_tags::apply_suggestion(&pool, id, Some(vec!["cafe".into(), "Fim de Semana".into()]))
+    let res = ai_tags::apply_suggestion(&pool, id, Some(vec!["cafe".into(), "Fim de Semana".into()]), None)
         .await
         .unwrap();
     assert_eq!(res["tags"].as_array().unwrap().len(), 2);
@@ -230,7 +232,7 @@ async fn apply_adds_tags_and_marks_applied(pool: PgPool) {
     assert_eq!(tags, vec!["pao", "cafe", "fim de semana"]);
 
     // Applying again → conflict.
-    match ai_tags::apply_suggestion(&pool, id, None).await {
+    match ai_tags::apply_suggestion(&pool, id, None, None).await {
         Err(AppError::Conflict(m)) => assert_eq!(m, "suggestion already reviewed"),
         other => panic!("expected Conflict, got {other:?}"),
     }
@@ -406,8 +408,8 @@ async fn categorize_batch_proposes_and_applies_categories(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    ai_tags::apply_suggestion(&pool, sug_a, None).await.unwrap();
-    ai_tags::apply_suggestion(&pool, sug_b, None).await.unwrap();
+    ai_tags::apply_suggestion(&pool, sug_a, None, None).await.unwrap();
+    ai_tags::apply_suggestion(&pool, sug_b, None, None).await.unwrap();
 
     let (cat_name_a, cat_name_b): (Option<String>, Option<String>) = sqlx::query_as(
         "SELECT c1.name, c2.name

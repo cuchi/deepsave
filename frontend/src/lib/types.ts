@@ -112,7 +112,7 @@ export interface SuggestionDetail {
   id: string
   batch_id: string
   batch_status: string
-  batch_kind: 'tags' | 'categorize'
+  batch_kind: 'tags' | 'categorize' | 'full'
   item_id: string
   suggested_tags: string[]
   /** Category proposal for categorize batches ('' when none; may be "nova: X"). */
@@ -127,6 +127,10 @@ export interface SuggestionDetail {
   category_name: string | null
   tags: string[]
   document_id: string | null
+  pluggy_category: string | null
+  mcc: number | null
+  operation_type: string | null
+  payment_method: string | null
 }
 
 // ---------- Pluggy ----------

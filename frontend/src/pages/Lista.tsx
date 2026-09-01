@@ -10,9 +10,10 @@ import {
   tagsApi,
   type BulkItemUpdateInput,
 } from '../api/client'
-import type { Item, RecurringRule, SuggestionDetail } from '../lib/types'
+import type { AiTagBatch, Item, RecurringRule, SuggestionDetail } from '../lib/types'
 import { currentMonth, fmtCents } from '../lib/format'
 import ItemForm from '../components/ItemForm'
+import SuggestionReviewModal from '../components/SuggestionReviewModal'
 import BulkEditModal from '../components/BulkEditModal'
 import BankLogo from '../components/BankLogo'
 import ItemFilters, { useFiltersUrl } from '../components/ItemFilters'
@@ -157,12 +158,13 @@ export default function Lista() {
   // (banner + per-row ✨ chip) as soon as the worker finishes.
   const [aiTagError, setAiTagError] = useState('')
   const tagWithAi = useMutation({
-    mutationFn: (v: { ids: string[]; kind: 'tags' | 'categorize' }) =>
+    mutationFn: (v: { ids: string[]; kind: 'tags' | 'categorize' | 'full' }) =>
       aiTagsApi.createBatch(v.ids, v.kind),
     onSuccess: () => {
       setSelected(new Set())
       setAiTagError('')
       refetchAi()
+      qc.invalidateQueries({ queryKey: ['ai-batches'] })
     },
     onError: (e) => {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
@@ -171,15 +173,43 @@ export default function Lista() {
   })
 
   // Pending tag suggestions (poll while any remain).
-  const [suggestionFor, setSuggestionFor] = useState<string | null>(null)
-  const [draftTags, setDraftTags] = useState<string[]>([])
-  const [draftInput, setDraftInput] = useState('')
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [reviewStartId, setReviewStartId] = useState<string | null>(null)
   const { data: aiSuggestions = [], refetch: refetchAi } = useQuery({
     queryKey: ['ai-suggestions'],
     queryFn: () => aiTagsApi.listSuggestions(),
-    refetchInterval: (query) => ((query.state.data?.length ?? 0) > 0 ? 6000 : false),
+    refetchInterval: (query) => {
+      // Poll while there are suggestions to review OR the worker is still
+      // running a batch (a batch can take minutes — suggestions appear only
+      // when it finishes).
+      const batches = qc.getQueryData<AiTagBatch[]>(['ai-batches'])
+      const hasWork =
+        (query.state.data?.length ?? 0) > 0 ||
+        (batches ?? []).some((b) => b.status === 'pending' || b.status === 'processing')
+      return hasWork ? 6000 : false
+    },
   })
-  const sugByItem = new Map(aiSuggestions.map((s) => [s.item_id, s]))
+  const { data: aiBatches = [] } = useQuery({
+    queryKey: ['ai-batches'],
+    queryFn: () => aiTagsApi.listBatches(),
+    refetchInterval: (query) => {
+      const active = (query.state.data ?? []).some(
+        (b) => b.status === 'pending' || b.status === 'processing',
+      )
+      return active ? 6000 : false
+    },
+  })
+  const aiWorking = aiBatches.some((b) => b.status === 'pending' || b.status === 'processing')
+  const aiWorkCount =
+    aiBatches.find((b) => b.status === 'pending' || b.status === 'processing')?.item_count ?? 0
+  // Worker failures happen async (the enqueue POST succeeds) — surface them.
+  const failedBatch = aiBatches.find(
+    (b) =>
+      b.status === 'failed' &&
+      Date.now() - new Date(b.created_at).getTime() < 60 * 60 * 1000,
+  )
+  const doneSuggestions = aiSuggestions.filter((s) => s.batch_status === 'done')
+  const sugByItem = new Map(doneSuggestions.map((s) => [s.item_id, s]))
   const [suggestionsOnly, setSuggestionsOnly] = useState(false)
   const visibleItems = suggestionsOnly ? items.filter((i) => sugByItem.has(i.id)) : items
 
@@ -190,31 +220,20 @@ export default function Lista() {
     qc.invalidateQueries({ queryKey: ['items'] })
   }
   const applySug = useMutation({
-    mutationFn: (v: { id: string; tags: string[] }) => aiTagsApi.apply(v.id, v.tags),
-    onSuccess: () => {
-      setSuggestionFor(null)
-      refreshAi()
-    },
+    mutationFn: (v: { id: string; tags?: string[]; category?: string }) =>
+      aiTagsApi.apply(v.id, { tags: v.tags, category: v.category }),
+    onSuccess: () => refreshAi(),
   })
   const dismissSug = useMutation({
     mutationFn: aiTagsApi.dismiss,
-    onSuccess: () => {
-      setSuggestionFor(null)
-      refreshAi()
-    },
+    onSuccess: () => refreshAi(),
   })
   const applyAllSug = useMutation({ mutationFn: () => aiTagsApi.applyAll(), onSuccess: refreshAi })
   const dismissAllSug = useMutation({ mutationFn: () => aiTagsApi.dismissAll(), onSuccess: refreshAi })
 
   const openSuggestion = (s: SuggestionDetail) => {
-    setSuggestionFor(s.id)
-    setDraftTags([...s.suggested_tags])
-    setDraftInput('')
-  }
-  const addDraftTag = () => {
-    const t = draftInput.trim().toLowerCase()
-    if (t && !draftTags.includes(t)) setDraftTags((d) => [...d, t])
-    setDraftInput('')
+    setReviewStartId(s.id)
+    setReviewOpen(true)
   }
 
   // Selection is scoped to what's currently visible: changing any filter resets
@@ -376,33 +395,29 @@ export default function Lista() {
               {cat.name}
             </span>
           )}
-          {sug &&
-            (sug.batch_kind === 'categorize'
-              ? sug.suggested_category !== ''
-              : sug.suggested_tags.length > 0) && (
-              sug.batch_kind === 'categorize' ? (
+          {sug && (sug.batch_kind === 'categorize' || sug.batch_kind === 'full') && sug.suggested_category !== '' && (
+            <button
+              onClick={() => openSuggestion(sug)}
+              title="Categoria sugerida pela IA — toque para aplicar/ignorar"
+              className="rounded border border-amber-500/50 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-amber-500/20"
+            >
+              {sug.suggested_category}
+            </button>
+          )}
+          {sug && sug.batch_kind !== 'categorize' && sug.suggested_tags.length > 0 && (
+            <span className="flex shrink-0 items-center gap-1">
+              {sug.suggested_tags.slice(0, 3).map((t) => (
                 <button
+                  key={t}
                   onClick={() => openSuggestion(sug)}
-                  title="Categoria sugerida pela IA — toque para aplicar/ignorar"
+                  title="Sugestão da IA — toque para aplicar/ignorar"
                   className="rounded border border-amber-500/50 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-amber-500/20"
                 >
-                  {sug.suggested_category}
+                  {t}
                 </button>
-              ) : (
-                <span className="flex shrink-0 items-center gap-1">
-                  {sug.suggested_tags.slice(0, 3).map((t) => (
-                    <button
-                      key={t}
-                      onClick={() => openSuggestion(sug)}
-                      title="Sugestão da IA — toque para aplicar/ignorar"
-                      className="rounded border border-amber-500/50 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-amber-500/20"
-                    >
-                      {t}
-                    </button>
-                  ))}
-                </span>
-              )
-            )}
+              ))}
+            </span>
+          )}
           {it.tags.length > 0 && (
             <span className="flex shrink-0 items-center gap-1">
               {it.tags.slice(0, 2).map((t) => (
@@ -492,91 +507,6 @@ export default function Lista() {
                 >
                   Apagar
                 </button>
-              </div>
-            </>
-          )}
-
-          {suggestionFor === sugByItem.get(it.id)?.id && (
-            <>
-              <div className="fixed inset-0 z-10" onClick={() => setSuggestionFor(null)} />
-              <div className="absolute right-0 top-full z-20 mt-1 w-64 rounded border border-zinc-700 bg-zinc-900 py-2 shadow-xl">
-                {sugByItem.get(it.id)?.batch_kind === 'categorize' ? (
-                  <>
-                    <p className="px-3 pb-1.5 text-xs text-zinc-400">
-                      Categoria sugerida pela IA
-                    </p>
-                    <p className="px-3 pb-2 text-sm text-zinc-200">
-                      {sugByItem.get(it.id)?.suggested_category || '—'}
-                    </p>
-                    <div className="flex justify-end gap-2 border-t border-zinc-800 px-3 pt-2">
-                      <button
-                        onClick={() => dismissSug.mutate(suggestionFor)}
-                        disabled={dismissSug.isPending}
-                        className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500"
-                      >
-                        Ignorar
-                      </button>
-                      <button
-                        onClick={() => applySug.mutate({ id: suggestionFor, tags: [] })}
-                        disabled={applySug.isPending}
-                        className="rounded bg-amber-300 px-2 py-1 text-xs font-semibold text-amber-950 hover:bg-amber-200"
-                      >
-                        Aplicar
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <p className="px-3 pb-1.5 text-xs text-zinc-400">
-                      Sugestão de tags da IA
-                    </p>
-                    <div className="flex flex-wrap gap-1 px-3 pb-2">
-                      {draftTags.length === 0 ? (
-                        <span className="text-xs text-zinc-600">nenhuma</span>
-                      ) : (
-                        draftTags.map((t) => (
-                          <span key={t} className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-300">
-                            {t}
-                            <button
-                              onClick={() => setDraftTags((d) => d.filter((x) => x !== t))}
-                              className="text-zinc-500 hover:text-zinc-200"
-                              title="remover"
-                            >
-                              ×
-                            </button>
-                          </span>
-                        ))
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1.5 px-3 pb-2">
-                      <input
-                        value={draftInput}
-                        onChange={(e) => setDraftInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') addDraftTag()
-                        }}
-                        placeholder="+ tag"
-                        className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs outline-none focus:border-zinc-500"
-                      />
-                    </div>
-                    <div className="flex justify-end gap-2 border-t border-zinc-800 px-3 pt-2">
-                      <button
-                        onClick={() => dismissSug.mutate(suggestionFor)}
-                        disabled={dismissSug.isPending}
-                        className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500"
-                      >
-                        Ignorar
-                      </button>
-                      <button
-                        onClick={() => applySug.mutate({ id: suggestionFor, tags: draftTags })}
-                        disabled={applySug.isPending}
-                        className="rounded bg-amber-300 px-2 py-1 text-xs font-semibold text-amber-950 hover:bg-amber-200"
-                      >
-                        Aplicar
-                      </button>
-                    </div>
-                  </>
-                )}
               </div>
             </>
           )}
@@ -688,7 +618,18 @@ export default function Lista() {
 
       {aiSuggestions.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
-          <span className="font-medium">✨ {aiSuggestions.length} sugestão(ões) da IA</span>
+          <span className="font-medium">✨ {doneSuggestions.length} sugestão(ões) da IA</span>
+          <button
+            onClick={() => {
+              setReviewStartId(null)
+              setReviewOpen(true)
+            }}
+            disabled={doneSuggestions.length === 0}
+            className="rounded border border-amber-400/60 px-2 py-0.5 text-xs font-medium text-amber-200 hover:bg-amber-400/10 disabled:opacity-50"
+            title="Revisar as sugestões uma a uma (categoria + tags)"
+          >
+            Revisar uma a uma →
+          </button>
           <label className="flex items-center gap-1.5 text-xs text-amber-300/80" title="Mostrar apenas os itens com sugestão pendente">
             <input
               type="checkbox"
@@ -731,18 +672,10 @@ export default function Lista() {
           <button
             onClick={() => tagWithAi.mutate({ ids: [...selected], kind: 'tags' })}
             disabled={tagWithAi.isPending}
-            title="Enfileira a IA para sugerir tags para os itens selecionados (as sugestões aparecem aqui na lista)"
+            title="Enfileira a IA para sugerir categoria e tags para os itens selecionados (revise um a um no modal)"
             className="rounded-full border border-amber-500/60 px-3 py-1.5 text-sm font-medium text-amber-300 hover:bg-amber-500/10 disabled:opacity-50"
           >
-            {tagWithAi.isPending ? 'Enfileirando…' : 'Taggear com IA'}
-          </button>
-          <button
-            onClick={() => tagWithAi.mutate({ ids: [...selected], kind: 'categorize' })}
-            disabled={tagWithAi.isPending}
-            title="Enfileira a IA para sugerir a categoria dos itens selecionados"
-            className="rounded-full border border-cyan-500/60 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
-          >
-            {tagWithAi.isPending ? 'Enfileirando…' : 'Categorizar com IA'}
+            {tagWithAi.isPending ? 'Enfileirando…' : '✨ Sugerir tags + categoria'}
           </button>
           <button
             onClick={() => setSelected(new Set())}
@@ -752,9 +685,25 @@ export default function Lista() {
           </button>
         </div>
       )}
-      {aiTagError && (
-        <div className="fixed bottom-20 left-1/2 z-10 -translate-x-1/2 rounded border border-red-500/40 bg-red-950/90 px-4 py-2 text-sm text-red-300 shadow-xl">
-          {aiTagError}
+      {reviewOpen && doneSuggestions.length > 0 && (
+        <SuggestionReviewModal
+          suggestions={doneSuggestions}
+          startId={reviewStartId ?? undefined}
+          categories={categories}
+          onApply={(id, opts) => applySug.mutate({ id, ...opts })}
+          onDismiss={(id) => dismissSug.mutate(id)}
+          onClose={() => setReviewOpen(false)}
+        />
+      )}
+      {aiWorking && !aiTagError && !failedBatch && (
+        <div className="fixed bottom-20 left-1/2 z-10 -translate-x-1/2 rounded border border-cyan-500/40 bg-cyan-950/90 px-4 py-2 text-sm text-cyan-300 shadow-xl">
+          IA processando {aiWorkCount} itens… as sugestões aparecem quando terminar
+        </div>
+      )}
+      {(aiTagError || failedBatch) && (
+        <div className="fixed bottom-20 left-1/2 z-10 -translate-x-1/2 max-w-[90vw] rounded border border-red-500/40 bg-red-950/90 px-4 py-2 text-sm text-red-300 shadow-xl">
+          {aiTagError ||
+            `Falha ao processar o lote de ${failedBatch?.kind === 'categorize' ? 'categorias' : 'tags'} (${failedBatch?.item_count} itens). ${failedBatch?.error_message ?? 'Tente novamente.'}`}
         </div>
       )}
 

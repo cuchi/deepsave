@@ -291,8 +291,12 @@ fn month_first_day(month: &str) -> Result<NaiveDate, AppError> {
     let (y, m) = month
         .split_once('-')
         .ok_or_else(|| AppError::bad_request("month must be YYYY-MM"))?;
-    let year: i32 = y.parse().map_err(|_| AppError::bad_request("invalid month"))?;
-    let mo: u32 = m.parse().map_err(|_| AppError::bad_request("invalid month"))?;
+    let year: i32 = y
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid month"))?;
+    let mo: u32 = m
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid month"))?;
     NaiveDate::from_ymd_opt(year, mo, 1).ok_or_else(|| AppError::bad_request("invalid month"))
 }
 
@@ -357,7 +361,12 @@ pub async fn digest_post(
     )
     .bind(from)
     .bind(value.get("resumo").and_then(|v| v.as_str()).unwrap_or(""))
-    .bind(value.get("destaques").cloned().unwrap_or(Value::Array(vec![])))
+    .bind(
+        value
+            .get("destaques")
+            .cloned()
+            .unwrap_or(Value::Array(vec![])),
+    )
     .bind(value.get("avisos").cloned().unwrap_or(Value::Array(vec![])))
     .fetch_one(&state.pool)
     .await?;
@@ -402,7 +411,7 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
     let today = chrono::Utc::now().date_naive();
     let months_ago = ((today.year() * 12 + today.month() as i32)
         - (from.year() * 12 + from.month() as i32))
-    .max(0);
+        .max(0);
     let previsao_relevante = today <= from + Months::new(1) + chrono::Duration::days(15);
 
     // Current month aggregates (reuse the dashboard core).
@@ -517,17 +526,18 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
     // only relevant for recent months.
     let mut recorrentes: Vec<Value> = Vec::new();
     if previsao_relevante {
-        let rec_rows: Vec<(String, i64, String, i32, Option<String>, Vec<String>)> = sqlx::query_as(
-            "SELECT r.name, r.amount_cents, r.frequency, r.interval,
+        let rec_rows: Vec<(String, i64, String, i32, Option<String>, Vec<String>)> =
+            sqlx::query_as(
+                "SELECT r.name, r.amount_cents, r.frequency, r.interval,
                     (SELECT c.name FROM items i JOIN categories c ON c.id = i.category_id
                      WHERE i.recurring_id = r.id ORDER BY i.occurred_on DESC LIMIT 1),
                     COALESCE((SELECT array_agg(DISTINCT t) FROM items i, unnest(i.tags) AS t
                               WHERE i.recurring_id = r.id), '{}')
              FROM recurring_rules r
              WHERE r.is_active AND r.amount_cents < 0 ORDER BY r.name",
-        )
-        .fetch_all(&state.pool)
-        .await?;
+            )
+            .fetch_all(&state.pool)
+            .await?;
         recorrentes = rec_rows
             .into_iter()
             .map(|(nome, amt, freq, interval, cat, tags)| {
@@ -571,17 +581,18 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
     let diario = crate::services::diary::recent_diary(&state.pool, 20).await?;
 
     // Previous month's saved digest (if any) — gives the AI continuity.
-    let prev_digest: Option<(String, Value, Value)> = sqlx::query_as(
-        "SELECT resumo, destaques, avisos FROM monthly_digests WHERE month = $1",
-    )
-    .bind(from - Months::new(1))
-    .fetch_optional(&state.pool)
-    .await?;
-    let digest_anterior = prev_digest.map(|(r, d, a)| json!({
-        "resumo": r,
-        "destaques": d,
-        "avisos": a,
-    }));
+    let prev_digest: Option<(String, Value, Value)> =
+        sqlx::query_as("SELECT resumo, destaques, avisos FROM monthly_digests WHERE month = $1")
+            .bind(from - Months::new(1))
+            .fetch_optional(&state.pool)
+            .await?;
+    let digest_anterior = prev_digest.map(|(r, d, a)| {
+        json!({
+            "resumo": r,
+            "destaques": d,
+            "avisos": a,
+        })
+    });
 
     let mut payload_map = serde_json::Map::new();
     payload_map.insert("mes".into(), json!(label));
@@ -977,7 +988,11 @@ pub async fn forecast(
 pub async fn forecast_data(pool: &PgPool, months: i32) -> Result<Vec<ForecastPoint>, AppError> {
     let months = months.clamp(1, 24);
     let today = chrono::Utc::now().date_naive();
-    let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+    // The forecast covers the NEXT months — the current month is already
+    // partially spent/known, so it starts at the first day of next month.
+    let first = (NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap())
+        .checked_add_months(chrono::Months::new(1))
+        .unwrap();
     let last_first = first
         .checked_add_months(chrono::Months::new(months as u32 - 1))
         .unwrap();

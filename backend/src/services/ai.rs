@@ -22,7 +22,13 @@ pub struct AiClient {
 impl AiClient {
     pub fn new(config: &Config, pool: PgPool) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Generous call timeout: a 100+ item batch takes a few minutes.
+            // Without one, a hung connection would freeze the worker forever.
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .expect("failed to build HTTP client"),
             api_key: config.deepseek_api_key.clone().unwrap_or_default(),
             base_url: config.deepseek_base_url.trim_end_matches('/').to_string(),
             model: config.deepseek_model.clone(),

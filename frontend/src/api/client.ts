@@ -281,7 +281,7 @@ export interface DigestResult {
 export const aiTagsApi = {
   /** Enqueue AI tagging for the selected items. */
   /** kind: 'tags' (default) or 'categorize' */
-  async createBatch(ids: string[], kind: 'tags' | 'categorize' = 'tags'): Promise<AiTagBatch> {
+  async createBatch(ids: string[], kind: 'tags' | 'categorize' | 'full' = 'full'): Promise<AiTagBatch> {
     return (await api.post<AiTagBatch>('/ai-tags/batches', { ids, kind })).data
   },
   async listBatches(): Promise<AiTagBatch[]> {
@@ -292,9 +292,16 @@ export const aiTagsApi = {
       params: batchId ? { batch_id: batchId } : {},
     })).data
   },
-  /** Apply a suggestion; `tags` overrides the stored proposal (post-edit). */
-  async apply(id: string, tags?: string[]): Promise<{ ok: boolean; tags: string[] }> {
-    return (await api.post(`/ai-tags/suggestions/${id}/apply`, tags ? { tags } : {})).data
+  /** Apply a suggestion; per-field: `tags`/`category` override the stored
+   * proposal (omit a field to leave it untouched on 'full' batches). */
+  async apply(
+    id: string,
+    opts: { tags?: string[]; category?: string } = {},
+  ): Promise<{ ok: boolean; item_id: string; tags?: string[]; category?: string }> {
+    const body: Record<string, unknown> = {}
+    if (opts.tags !== undefined) body.tags = opts.tags
+    if (opts.category !== undefined) body.category = opts.category
+    return (await api.post(`/ai-tags/suggestions/${id}/apply`, body)).data
   },
   async dismiss(id: string): Promise<{ ok: boolean }> {
     return (await api.post(`/ai-tags/suggestions/${id}/dismiss`)).data

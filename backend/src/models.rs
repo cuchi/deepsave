@@ -199,6 +199,11 @@ pub struct SuggestionDetail {
     pub category_name: Option<String>,
     pub tags: Vec<String>,
     pub document_id: Option<Uuid>,
+    // Pluggy enrichment (joined in).
+    pub pluggy_category: Option<String>,
+    pub mcc: Option<i64>,
+    pub operation_type: Option<String>,
+    pub payment_method: Option<String>,
 }
 
 // ---------- Recurring rules ----------

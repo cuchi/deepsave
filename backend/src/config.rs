@@ -32,6 +32,8 @@ pub struct Config {
     pub pluggy_client_id: Option<String>,
     pub pluggy_client_secret: Option<String>,
     pub pluggy_api_key: Option<String>,
+    /// Daily automatic Pluggy sync (last 7 days). Defaults to enabled.
+    pub daily_pluggy_sync: bool,
     /// Accounts to import (ids from the Pluggy dashboard — stable).
     pub pluggy_accounts: Vec<PluggyAccountConf>,
 }
@@ -115,6 +117,9 @@ impl Config {
         let pluggy_api_key = std::env::var("PLUGGY_API_KEY")
             .ok()
             .filter(|s| !s.is_empty());
+        let daily_pluggy_sync = std::env::var("DAILY_PLUGGY_SYNC")
+            .map(|v| !matches!(v.trim().to_lowercase().as_str(), "0" | "false" | "no" | "off"))
+            .unwrap_or(true);
         let pluggy_accounts = std::env::var("PLUGGY_ACCOUNTS")
             .ok()
             .filter(|s| !s.is_empty())
@@ -146,6 +151,7 @@ impl Config {
             pluggy_client_id,
             pluggy_client_secret,
             pluggy_api_key,
+            daily_pluggy_sync,
             pluggy_accounts,
         })
     }

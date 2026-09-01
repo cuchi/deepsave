@@ -72,7 +72,8 @@ pub async fn list_suggestions_query(
                 s.item_id, s.suggested_tags, s.suggested_category,
                 s.status, s.created_at,
                 i.merchant, i.description, i.amount_cents, i.occurred_on,
-                i.category_id, c.name AS category_name, i.tags, i.document_id
+                i.category_id, c.name AS category_name, i.tags, i.document_id,
+                i.pluggy_category, i.mcc::bigint, i.operation_type, i.payment_method
          FROM ai_tag_suggestions s
          JOIN ai_tag_batches b ON b.id = s.batch_id
          JOIN items i ON i.id = s.item_id
@@ -90,9 +91,13 @@ pub async fn list_suggestions_query(
 #[derive(Debug, Deserialize)]
 pub struct ApplyInput {
     /// Optional override: the final tag list to add (as edited by the user).
-    /// Omitted = use the stored `suggested_tags`.
+    /// Omitted = leave tags untouched ('full' batches) or use stored tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Per-field (only meaningful for 'full' batches): Some(c) applies the
+    /// category ('' = explicit skip); None = leave the category untouched.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 /// `POST /ai-tags/suggestions/{id}/apply`
@@ -102,7 +107,7 @@ pub async fn apply(
     Json(input): Json<ApplyInput>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     Ok(Json(
-        ai_tags::apply_suggestion(&state.pool, id, input.tags).await?,
+        ai_tags::apply_suggestion(&state.pool, id, input.tags, input.category).await?,
     ))
 }
 

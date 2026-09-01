@@ -32,8 +32,8 @@ pub async fn enqueue_batch(
     ids: Vec<Uuid>,
     kind: &str,
 ) -> Result<AiTagBatch, AppError> {
-    if !matches!(kind, "tags" | "categorize") {
-        return Err(AppError::bad_request("invalid kind (tags | categorize)"));
+    if !matches!(kind, "tags" | "categorize" | "full") {
+        return Err(AppError::bad_request("invalid kind (tags | categorize | full)"));
     }
     let mut seen = HashSet::new();
     let ids: Vec<Uuid> = ids.into_iter().filter(|id| seen.insert(*id)).collect();
@@ -83,17 +83,27 @@ pub async fn enqueue_batch(
     })
 }
 
-/// Background worker: claim `pending` batches and run the right processor.
+/// A batch claimed longer ago than this (minutes) is considered orphaned —
+/// safe: 100+ item batches take ~3 minutes, so 10 is a generous margin.
+const STALE_CLAIM_MINUTES: i32 = 10;
+
+/// Background worker: claim batches and run the right processor. On startup it
+/// resets any `processing` batch to `pending` — with a single worker instance,
+/// one still marked processing can only be an orphan of a previous process.
 pub async fn run_worker(pool: PgPool, ai: AiClient) {
     info!("ai-tag worker started");
+    sqlx::query("UPDATE ai_tag_batches SET status = 'pending', claimed_at = NULL WHERE status = 'processing'")
+        .execute(&pool)
+        .await
+        .ok();
     loop {
         match claim_next(&pool).await {
             Some(batch) => {
                 info!(batch = %batch.id, items = batch.item_count, kind = %batch.kind, "processing ai batch");
-                let res = if batch.kind == "categorize" {
-                    process_categorize_batch(&pool, &ai, batch.id).await
-                } else {
-                    process_batch(&pool, &ai, batch.id).await
+                let res = match batch.kind.as_str() {
+                    "categorize" => process_categorize_batch(&pool, &ai, batch.id).await,
+                    "full" => process_full_batch(&pool, &ai, batch.id).await,
+                    _ => process_batch(&pool, &ai, batch.id).await,
                 };
                 match res {
                     Ok(()) => {
@@ -124,17 +134,44 @@ pub async fn run_worker(pool: PgPool, ai: AiClient) {
     }
 }
 
+/// Claim the next batch: any `pending` one, or a `processing` one that was
+/// claimed more than STALE_CLAIM_MINUTES ago (orphaned by a crashed worker or
+/// a hung AI call). Stamps `claimed_at` so the watchdog can age them.
 async fn claim_next(pool: &PgPool) -> Option<AiTagBatch> {
     sqlx::query_as::<_, AiTagBatch>(sqlx::AssertSqlSafe(
-        "UPDATE ai_tag_batches SET status = 'processing'
-         WHERE id = (SELECT id FROM ai_tag_batches WHERE status = 'pending' ORDER BY created_at LIMIT 1)
+        "UPDATE ai_tag_batches SET status = 'processing', claimed_at = now()
+         WHERE id = (SELECT id FROM ai_tag_batches
+                     WHERE status = 'pending'
+                        OR (status = 'processing'
+                            AND claimed_at < now() - make_interval(mins => $1))
+                     ORDER BY created_at LIMIT 1)
          RETURNING id, status, error_message, created_at, processed_at, kind,
                    0::bigint AS item_count"
     ))
+    .bind(STALE_CLAIM_MINUTES)
     .fetch_optional(pool)
     .await
     .ok()
     .flatten()
+}
+
+/// Normalize an identity: strip accents, lowercase, drop non-alphanumerics.
+fn norm_key(x: &str) -> String {
+    crate::services::tags::strip_accents(x)
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// Normalized names of all active categories — used to (a) remove category
+/// names from the AI's tag vocabulary and (b) drop suggested tags that are
+/// really categories (deterministic post-filter).
+async fn category_norms(pool: &PgPool) -> Result<std::collections::HashSet<String>, sqlx::Error> {
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM categories WHERE is_active")
+        .fetch_all(pool)
+        .await?;
+    Ok(names.iter().map(|n| norm_key(n)).collect())
 }
 
 type BatchItemRow = (
@@ -207,7 +244,7 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
 
     let rows: Vec<BatchItemRow> = sqlx::query_as(
         "SELECT i.id, i.merchant, i.description, i.amount_cents, i.occurred_on, c.name, i.tags,
-                i.pluggy_category, i.mcc, i.operation_type, i.payment_method
+                i.pluggy_category, i.mcc::bigint, i.operation_type, i.payment_method
          FROM items i
          LEFT JOIN categories c ON c.id = i.category_id
          WHERE i.id = ANY($1)",
@@ -222,6 +259,12 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
     )
     .fetch_all(pool)
     .await?;
+    // Tags that are also categories are never suggested (the category covers it).
+    let cat_norms = category_norms(pool).await?;
+    let all_tags: Vec<String> = all_tags
+        .into_iter()
+        .filter(|t| !cat_norms.contains(&norm_key(t)))
+        .collect();
 
     let merchants: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT merchant FROM items WHERE id = ANY($1) AND merchant IS NOT NULL",
@@ -317,7 +360,10 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
                         .collect()
                 })
                 .unwrap_or_default();
-            let tags = tags::normalize(&raw_tags);
+            let tags: Vec<String> = tags::normalize(&raw_tags)
+                .into_iter()
+                .filter(|t| !cat_norms.contains(&norm_key(t)))
+                .collect();
             sqlx::query(
                 "UPDATE ai_tag_suggestions SET suggested_tags = $1
                  WHERE batch_id = $2 AND item_id = $3",
@@ -331,6 +377,238 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// Run the AI call for a **full** batch (kind = 'full'): one pass that suggests
+/// BOTH a category and tags per item. Category names are removed from the tag
+/// vocabulary and any suggested tag that collides with a category is dropped —
+/// tags are situational, categories cover the "what".
+async fn process_full_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Result<()> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT item_id FROM ai_tag_suggestions WHERE batch_id = $1 ORDER BY created_at",
+    )
+    .bind(batch_id)
+    .fetch_all(pool)
+    .await?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let rows: Vec<BatchItemRow> = sqlx::query_as(
+        "SELECT i.id, i.merchant, i.description, i.amount_cents, i.occurred_on, c.name, i.tags,
+                i.pluggy_category, i.mcc::bigint, i.operation_type, i.payment_method
+         FROM items i
+         LEFT JOIN categories c ON c.id = i.category_id
+         WHERE i.id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    let by_id: HashMap<Uuid, _> = rows.into_iter().map(|r| (r.0, r)).collect();
+
+    // Active categories (name + parent) for the AI to choose from, and their
+    // normalized names for the tag→category collision filter.
+    let categories: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT c.name, p.name FROM categories c
+         LEFT JOIN categories p ON p.id = c.parent_id
+         WHERE c.is_active ORDER BY c.name",
+    )
+    .fetch_all(pool)
+    .await?;
+    let cat_norms = category_norms(pool).await?;
+
+    // Tag vocabulary: the user's existing tags MINUS category names.
+    let all_tags: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT tag FROM items CROSS JOIN LATERAL unnest(tags) AS tag ORDER BY tag",
+    )
+    .fetch_all(pool)
+    .await?;
+    let all_tags: Vec<String> = all_tags
+        .into_iter()
+        .filter(|t| !cat_norms.contains(&norm_key(t)))
+        .collect();
+
+    let merchants: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT merchant FROM items WHERE id = ANY($1) AND merchant IS NOT NULL",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+
+    // Per merchant: the last `EXAMPLES_PER_MERCHANT` confirmed items that carry
+    // tags — real ground truth for the AI to mirror.
+    let mut examples: Vec<serde_json::Value> = Vec::new();
+    for merchant in &merchants {
+        let ex: Vec<ExampleRow> = sqlx::query_as(
+            "SELECT i.description, i.amount_cents, i.occurred_on, c.name, i.tags
+             FROM items i
+             LEFT JOIN categories c ON c.id = i.category_id
+             WHERE i.merchant = $1 AND cardinality(i.tags) > 0 AND i.status = 'confirmed'
+             ORDER BY i.occurred_on DESC, i.created_at DESC
+             LIMIT $2",
+        )
+        .bind(merchant)
+        .bind(EXAMPLES_PER_MERCHANT)
+        .fetch_all(pool)
+        .await?;
+        if !ex.is_empty() {
+            let list: Vec<serde_json::Value> = ex
+                .into_iter()
+                .map(|(desc, amt, date, cat, tags)| {
+                    json!({ "desc": desc, "amt": amt, "date": date, "cat": cat, "tags": tags })
+                })
+                .collect();
+            examples.push(json!({ "merch": merchant, "n": list }));
+        }
+    }
+
+    // Compact item list, in batch (selection) order.
+    let mut items = Vec::with_capacity(ids.len());
+    let mut keys: Vec<String> = Vec::new();
+    for (i, id) in ids.iter().enumerate() {
+        if let Some((_, merchant, description, amount, date, cat, tags, pc, mcc, ot, pm)) = by_id.get(id) {
+            let key = crate::services::change_log::merchant_key(merchant.as_deref(), description);
+            keys.push(key);
+            items.push(json!({
+                "i": i,
+                "desc": description,
+                "merch": merchant,
+                "amt": amount,
+                "date": date.format("%Y-%m-%d").to_string(),
+                "cat": cat,
+                "tags": tags,
+                "pc": pc, "mcc": mcc, "op": ot, "pay": pm,
+            }));
+        }
+    }
+    let history = load_change_history(pool, &keys).await?;
+    for it in &mut items {
+        let key = crate::services::change_log::merchant_key(
+            it["merch"].as_str(),
+            it["desc"].as_str().unwrap_or(""),
+        );
+        if let Some(h) = history.get(&key) {
+            it["hist"] = json!(h);
+        }
+    }
+
+    let tag_desc = tags::tag_descriptions(pool, &all_tags).await?;
+    let diario = crate::services::diary::recent_diary(pool, 10).await?;
+    let user = json!({
+        "categories": categories.iter().map(|(n, p)| match p { Some(p) => format!("{n} ({p})"), None => n.clone() }).collect::<Vec<_>>(),
+        "all_tags": all_tags,
+        "tag_desc": tag_desc,
+        "diario": diario,
+        "items": items,
+        "ex": examples,
+    });
+    let system = build_full_system_prompt();
+    let value = ai
+        .chat_json(&system, json!(user.to_string()), ai.text_model(), None, "tag_batch")
+        .await
+        .context("AI tagging call failed")?;
+
+    let mut seen = HashSet::new();
+    let mut tx = pool.begin().await?;
+    // Fallback: the model sometimes returns categories in a separate top-level
+    // "categories" array (index → category) instead of inside "suggestions".
+    let cats_by_index: std::collections::HashMap<usize, String> = value
+        .get("categories")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let i = e.get("index").and_then(|x| x.as_u64())? as usize;
+                    let c = e
+                        .get("category")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    Some((i, c))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(arr) = value.get("suggestions").and_then(|v| v.as_array()) {
+        for entry in arr {
+            let Some(index) = entry.get("index").and_then(|x| x.as_u64()) else {
+                continue;
+            };
+            let index = index as usize;
+            if index >= ids.len() || !seen.insert(index) {
+                continue;
+            }
+            let raw_tags: Vec<String> = entry
+                .get("tags")
+                .and_then(|t| t.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Deterministic collision filter: a tag that is also a category name
+            // is dropped (the category suggestion covers it).
+            let tags: Vec<String> = tags::normalize(&raw_tags)
+                .into_iter()
+                .filter(|t| !cat_norms.contains(&norm_key(t)))
+                .collect();
+            let mut category = entry
+                .get("category")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if category.is_empty() {
+                category = cats_by_index.get(&index).cloned().unwrap_or_default();
+            }
+            sqlx::query(
+                "UPDATE ai_tag_suggestions SET suggested_tags = $1, suggested_category = $2
+                 WHERE batch_id = $3 AND item_id = $4",
+            )
+            .bind(&tags)
+            .bind(&category)
+            .bind(batch_id)
+            .bind(ids[index])
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Stable system prompt for 'full' batches: category + tags in one pass.
+fn build_full_system_prompt() -> String {
+    r#"Você é um especialista em finanças pessoais brasileiras. Para cada item, sugira uma CATEGORIA e TAGS. Responda APENAS com JSON válido (sem markdown, sem texto extra).
+
+Esquema JSON exato:
+{
+  "suggestions": [
+    { "index": integer, "category": string, "tags": [string] }
+  ]
+}
+
+Regras:
+- "index" é a posição (0-based) do item no array "items" da mensagem do usuário. NÃO invente índices; use apenas índices que existem em "items". Inclua um índice para CADA item — nenhum pode faltar.
+
+CATEGORIA:
+- Escolha entre as categorias de "categories" (formato "Nome (Grupo)"). Se nenhuma encaixar bem, proponha uma nova com o prefixo "nova: " (ex.: "nova: Pet shop"). Use isso com moderação.
+- Categorize TODOS os itens, mesmo com pouca informação. Exceção — movimentos de dinheiro sem categoria (transferência entre contas próprias, pagamento de fatura de cartão, investimento, estorno de imposto): use "category": "".
+- Guia: supermercado → "Supermercado"; restaurante/delivery/ifood → "Restaurantes"; posto/gasolina → "Transporte"; farmácia/saúde/clínica → "Saúde"; assinatura (streaming, apps, telefone) → "Assinaturas"; aluguel/condomínio/contas de casa → "Moradia"; loja/e-commerce/roupa → "Compras" (ou a categoria mais próxima existente); lazer/viagem/hotel → "Lazer"; imposto/taxa → "Outros"; compra internacional/foreign → "Outros" (ou "nova: " se fizer sentido).
+
+TAGS:
+- Sugira de 2 a 4 tags por item, curtas, em minúsculas e sem acentos, em português (ex: "viagem", "assinatura", "presente", "trabalho", "mercado"). Prefira 2-3 tags úteis (tema + contexto).
+- TAGS SÃO SITUACIONAIS (contexto do gasto), NÃO a categoria. NUNCA sugira uma tag que seja igual a uma categoria de "categories" (ex.: se a categoria é "Compras", não sugira a tag "compras"; se é "Saúde", não use "saude") — a categoria já cobre isso.
+- Se o item já tem tags, você pode mantê-las ou refiná-las.
+- "all_tags" lista as tags que o usuário já usa (já exclui as que são categorias); "tag_desc" traz o significado de algumas delas — respeite esses significados.
+- Prefira tags de "all_tags"; crie uma nova tag apenas se nenhuma existente encaixar bem.
+- "ex" traz exemplos reais de itens já taggeados do mesmo comerciante — use-os como referência de estilo.
+- "hist" traz o histórico das mudanças do usuário nesse comerciante — a decisão mais recente (sobre transação recente) reflete a preferência atual.
+- "diario" traz anotações do usuário sobre a vida dele — use para interpretar contextos (ex.: divórcio explica gastos com a tag "daiana").
+- Metadados por item: "pc" (categoria sugerida pelo banco), "mcc" (código do comerciante: 5817/5818/5968=assinatura, 5411=supermercado, 5812=restaurante), "op" (tipo de movimento: PIX, BOLETO, PORTABILIDADE_SALARIO), "pay" (PIX/TED/DOC) — use-os como evidência (ex.: "op":"PORTABILIDADE_SALARIO" → tag "salario"; "pay":"PIX" → tag "pix")."#
+        .to_string()
 }
 
 /// Stable system prompt (kept constant so DeepSeek's context cache can serve it);
@@ -384,7 +662,7 @@ pub async fn process_categorize_batch(pool: &PgPool, ai: &AiClient, batch_id: Uu
 
     let rows: Vec<BatchItemRow> = sqlx::query_as(
         "SELECT i.id, i.merchant, i.description, i.amount_cents, i.occurred_on, c.name, i.tags,
-                i.pluggy_category, i.mcc, i.operation_type, i.payment_method
+                i.pluggy_category, i.mcc::bigint, i.operation_type, i.payment_method
          FROM items i
          LEFT JOIN categories c ON c.id = i.category_id
          WHERE i.id = ANY($1)",
@@ -574,6 +852,7 @@ pub async fn apply_suggestion(
     pool: &PgPool,
     suggestion_id: Uuid,
     tags: Option<Vec<String>>,
+    category: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
     let row: Option<(Uuid, Vec<String>, String, String, String)> = sqlx::query_as(
         "SELECT s.item_id, s.suggested_tags, s.status, s.suggested_category, b.kind
@@ -595,10 +874,49 @@ pub async fn apply_suggestion(
         return apply_category_suggestion(pool, suggestion_id, item_id, &stored_category).await;
     }
 
-    let tags = match tags {
-        Some(t) => tags::normalize(&t),
-        None => stored_tags,
+    // 'tags' and 'full' batches share the per-field apply: `None` = leave that
+    // field untouched; both `None` = apply everything that was suggested. A
+    // category override works on 'tags' batches too (the review modal lets the
+    // user pick a category even when the batch only proposed tags).
+    apply_full_suggestion(pool, suggestion_id, item_id, &stored_tags, &stored_category, tags, category).await
+}
+
+/// Sentinel category value: the caller wants to CLEAR the item's category.
+const CLEAR_CATEGORY: &str = "__none__";
+
+/// Apply a suggestion with per-field semantics ('tags' and 'full' batches):
+/// only the fields the caller sent (Some) are touched; if both are None, apply
+/// both suggestions. `category` may be an existing name, "nova: <nome>", '' to
+/// skip, or "__none__" to clear the item's category.
+async fn apply_full_suggestion(
+    pool: &PgPool,
+    suggestion_id: Uuid,
+    item_id: Uuid,
+    stored_tags: &[String],
+    stored_category: &str,
+    tags: Option<Vec<String>>,
+    category: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    let apply_tags: Option<Vec<String>> = match &tags {
+        Some(t) => Some(tags::normalize(t)),
+        None if category.is_none() => Some(stored_tags.to_vec()),
+        None => None,
     };
+    let apply_cat: Option<String> = match &category {
+        Some(c) if c.trim().is_empty() => None, // explicit "skip category"
+        Some(c) => Some(c.trim().to_string()),
+        None if tags.is_none() => {
+            if stored_category.trim().is_empty() {
+                None
+            } else {
+                Some(stored_category.trim().to_string())
+            }
+        }
+        None => None,
+    };
+    if apply_tags.is_none() && apply_cat.is_none() {
+        return Err(AppError::bad_request("nothing to apply"));
+    }
 
     let before: (Option<Uuid>, Vec<String>) =
         sqlx::query_as("SELECT category_id, tags FROM items WHERE id = $1")
@@ -607,8 +925,25 @@ pub async fn apply_suggestion(
             .await?;
 
     let mut tx = pool.begin().await?;
-    if !tags.is_empty() {
-        add_tags_to_item(&mut tx, item_id, &tags).await?;
+    if let Some(c) = &apply_cat {
+        if c == CLEAR_CATEGORY {
+            sqlx::query("UPDATE items SET category_id = NULL, updated_at = now() WHERE id = $1")
+                .bind(item_id)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            let cat_id = resolve_category_id(pool, c).await?;
+            sqlx::query("UPDATE items SET category_id = $1, updated_at = now() WHERE id = $2")
+                .bind(cat_id)
+                .bind(item_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    if let Some(t) = &apply_tags {
+        if !t.is_empty() {
+            add_tags_to_item(&mut tx, item_id, t).await?;
+        }
     }
     sqlx::query("UPDATE ai_tag_suggestions SET status = 'applied' WHERE id = $1")
         .bind(suggestion_id)
@@ -616,7 +951,6 @@ pub async fn apply_suggestion(
         .await?;
     tx.commit().await?;
 
-    // Log the change (durable history for the AI).
     let after: (Option<Uuid>, Vec<String>) =
         sqlx::query_as("SELECT category_id, tags FROM items WHERE id = $1")
             .bind(item_id)
@@ -633,7 +967,12 @@ pub async fn apply_suggestion(
     )
     .await;
 
-    Ok(json!({ "ok": true, "item_id": item_id, "tags": tags }))
+    Ok(json!({
+        "ok": true,
+        "item_id": item_id,
+        "category": apply_cat,
+        "tags": apply_tags,
+    }))
 }
 
 /// Resolve a category proposal to a category id: "nova: <nome>" creates the
@@ -785,6 +1124,18 @@ pub async fn apply_all(pool: &PgPool, batch_id: Option<Uuid>) -> Result<serde_js
                     .bind(item_id)
                     .execute(&mut *tx)
                     .await?;
+            }
+        } else if kind == "full" {
+            if !category.is_empty() {
+                let cat_id = resolve_category_id(pool, category).await?;
+                sqlx::query("UPDATE items SET category_id = $1, updated_at = now() WHERE id = $2")
+                    .bind(cat_id)
+                    .bind(item_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            if !tags.is_empty() {
+                add_tags_to_item(&mut tx, *item_id, tags).await?;
             }
         } else if !tags.is_empty() {
             add_tags_to_item(&mut tx, *item_id, tags).await?;

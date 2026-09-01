@@ -43,6 +43,7 @@ pub fn test_config(base_url: String) -> Config {
         pluggy_client_secret: None,
         pluggy_api_key: None,
         pluggy_accounts: vec![],
+        daily_pluggy_sync: false,
     }
 }
 

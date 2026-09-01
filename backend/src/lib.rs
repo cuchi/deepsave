@@ -158,6 +158,12 @@ pub async fn run() -> anyhow::Result<()> {
         tracing::warn!("PLUGGY_ACCOUNTS set but Pluggy credentials missing — integration disabled");
     }
     tokio::spawn(services::ai_tags::run_worker(pool.clone(), ai.clone()));
+    tokio::spawn(services::jobs::run_daily_pluggy_sync(
+        pool.clone(),
+        pluggy.clone(),
+        config.pluggy_accounts.clone(),
+        config.daily_pluggy_sync,
+    ));
 
     let session_key = if config.session_secret.len() >= 32 {
         Key::derive_from(config.session_secret.as_bytes())
