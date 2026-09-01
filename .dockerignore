@@ -21,3 +21,9 @@ storage/
 
 # Local dev artifacts
 /tmp
+
+# Real personal data / local-only artifacts — never build these into images
+# (bank exports, DB backups, deploy secrets)
+examples/
+backups/
+deploy/
