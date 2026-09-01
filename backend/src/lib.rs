@@ -189,10 +189,7 @@ pub async fn run() -> anyhow::Result<()> {
             "/categories",
             get(routes::categories::list).post(routes::categories::create),
         )
-        .route(
-            "/categories/{id}",
-            patch(routes::categories::update).delete(routes::categories::delete),
-        )
+        .route("/categories/{id}", delete(routes::categories::delete))
         .route(
             "/items",
             get(routes::items::list).post(routes::items::create),
@@ -225,10 +222,7 @@ pub async fn run() -> anyhow::Result<()> {
                 .patch(routes::items::update)
                 .delete(routes::items::delete),
         )
-        .route("/items/{id}/confirm", post(routes::items::confirm))
-        .route("/items/{id}/reject", post(routes::items::reject))
         .route("/items/{id}/link-recurring", post(routes::items::link_recurring))
-        .route("/items/{id}/accept-suggestion", post(routes::items::accept_suggestion))
         .route("/banks", get(routes::items::banks))
         .route(
             "/recurring",
@@ -246,7 +240,6 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/dashboard/trend", get(routes::dashboard::trend))
         .route("/dashboard/daily", get(routes::dashboard::daily))
         .route("/dashboard/tags", get(routes::dashboard::tags))
-        .route("/dashboard/expected", get(routes::dashboard::expected))
         .route("/dashboard/forecast", get(routes::dashboard::forecast))
         .route("/dashboard/upcoming", get(routes::dashboard::upcoming))
         .route(

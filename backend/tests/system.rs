@@ -31,11 +31,9 @@ async fn system_info_reports_sizes_and_table_counts(pool: PgPool) {
         "categories",
         "documents",
         "items",
-        "matches",
         "recurring_aliases",
         "recurring_rules",
         "sources",
-        "users",
     ] {
         assert!(tables.contains(&expected), "missing table {expected}");
     }

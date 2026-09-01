@@ -14,11 +14,6 @@ pub async fn migrate(pool: &PgPool) {
     sqlx::migrate!("./migrations").run(pool).await.unwrap();
 }
 
-/// Absolute path to a fixture file under `tests/fixtures/`.
-pub fn fixture(name: &str) -> String {
-    format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
-}
-
 /// A Config pointing at a mock DeepSeek base URL (for tests only).
 pub fn test_config(base_url: String) -> Config {
     Config {
@@ -33,8 +28,6 @@ pub fn test_config(base_url: String) -> Config {
         deepseek_api_key: Some("test-key".to_string()),
         deepseek_base_url: base_url,
         deepseek_model: "deepseek-v4-flash".to_string(),
-        deepseek_vision_model: "deepseek-v4-flash-vision-exp".to_string(),
-        deepseek_pro_model: "deepseek-v4-pro".to_string(),
         deepseek_input_price_per_m: 0.27,
         deepseek_cache_hit_price_per_m: 0.07,
         deepseek_output_price_per_m: 1.10,

@@ -4,7 +4,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::models::{Category, NewCategory, UpdateCategory};
+use crate::models::{Category, NewCategory};
 use crate::AppState;
 
 const CATEGORY_COLS: &str = "id, parent_id, name, color, icon, is_active";
@@ -35,29 +35,6 @@ pub async fn create(
     .bind(&input.icon)
     .fetch_one(&state.pool)
     .await?;
-    Ok(Json(cat))
-}
-
-pub async fn update(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Json(input): Json<UpdateCategory>,
-) -> Result<Json<Category>, AppError> {
-    let cat = sqlx::query_as::<_, Category>(sqlx::AssertSqlSafe(format!(
-        "UPDATE categories
-         SET name = $1, parent_id = $2, color = $3, icon = $4, is_active = $5
-         WHERE id = $6
-         RETURNING {CATEGORY_COLS}"
-    )))
-    .bind(&input.name)
-    .bind(input.parent_id)
-    .bind(&input.color)
-    .bind(&input.icon)
-    .bind(input.is_active)
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| AppError::not_found("category not found"))?;
     Ok(Json(cat))
 }
 

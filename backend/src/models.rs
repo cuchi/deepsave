@@ -23,15 +23,6 @@ pub struct NewCategory {
     pub icon: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UpdateCategory {
-    pub name: String,
-    pub parent_id: Option<Uuid>,
-    pub color: Option<String>,
-    pub icon: Option<String>,
-    pub is_active: bool,
-}
-
 // ---------- Tags ----------
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -144,21 +135,6 @@ pub struct BulkItemUpdate {
 }
 
 // ---------- Accounts ----------
-
-// ---------- Merchant memory ----------
-
-#[derive(Debug, Clone, FromRow, Serialize)]
-pub struct MemoryEntry {
-    pub id: Uuid,
-    pub merchant: String,
-    pub category_id: Option<Uuid>,
-    pub category_name: Option<String>,
-    /// Tags remembered for this merchant (accumulated over confirmations).
-    pub tags: Vec<String>,
-    pub confidence: f32,
-    pub confirm_count: i32,
-    pub last_confirmed_at: Option<DateTime<Utc>>,
-}
 
 // ---------- AI tag batches ----------
 

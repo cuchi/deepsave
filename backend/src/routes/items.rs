@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::models::{BulkItemUpdate, Item, ItemInput, ItemSummary, TagsMode};
-use crate::services::{recurring, tags};
+use crate::services::tags;
 use crate::AppState;
 
 pub(crate) const ITEM_COLS: &str = "id, parent_id, document_id, source, kind, status, account_id, \
@@ -495,36 +495,6 @@ pub async fn delete(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Mark a `pending_review` item as confirmed, and move its document to
-/// `processed` once no pending items remain.
-pub async fn confirm(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let affected = sqlx::query("UPDATE items SET status = 'confirmed', updated_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(&state.pool)
-        .await?
-        .rows_affected();
-    if affected == 0 {
-        return Err(AppError::not_found("item not found"));
-    }
-
-    // Auto-link to a recurring rule whose alias matches this item.
-    recurring::link_item(&state.pool, id).await?;
-
-    Ok(Json(json!({ "ok": true })))
-}
-
-/// Mark a `pending_review` item as rejected.
-pub async fn reject(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    set_item_status(&state, id, "rejected").await?;
-    Ok(Json(json!({ "ok": true })))
-}
-
 // ---------- Recurring-rule manual linking ----------
 
 #[derive(Debug, Deserialize)]
@@ -605,56 +575,3 @@ async fn set_item_link(pool: &PgPool, ids: &[Uuid], rule_id: Option<Uuid>) -> Re
     Ok(res.rows_affected())
 }
 
-/// Apply the remembered category + tags for this item's merchant (one-click).
-/// Category replaces; tags are added (union) — situational tags stay.
-
-/// Create the suggested category (if needed) and assign it to the item.
-pub async fn accept_suggestion(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Item>, AppError> {
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT suggested_category FROM items WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((Some(name),)) = row else {
-        return Err(AppError::bad_request("no suggested category for this item"));
-    };
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err(AppError::bad_request("empty suggested category"));
-    }
-
-    let category_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO categories (name) VALUES ($1)
-         ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-         RETURNING id",
-    )
-    .bind(&name)
-    .fetch_one(&state.pool)
-    .await?;
-
-    let item = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
-        "UPDATE items SET category_id = $1, suggested_category = NULL, updated_at = now()
-         WHERE id = $2 RETURNING {ITEM_COLS}"
-    )))
-    .bind(category_id)
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
-    Ok(Json(item))
-}
-
-async fn set_item_status(state: &AppState, id: Uuid, status: &str) -> Result<(), AppError> {
-    let affected = sqlx::query("UPDATE items SET status = $1, updated_at = now() WHERE id = $2")
-        .bind(status)
-        .bind(id)
-        .execute(&state.pool)
-        .await?
-        .rows_affected();
-    if affected == 0 {
-        return Err(AppError::not_found("item not found"));
-    }
-    Ok(())
-}

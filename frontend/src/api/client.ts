@@ -48,12 +48,6 @@ export const categoriesApi = {
   async create(input: CategoryInput): Promise<Category> {
     return (await api.post<Category>('/categories', input)).data
   },
-  async update(
-    id: string,
-    input: CategoryInput & { is_active: boolean },
-  ): Promise<Category> {
-    return (await api.patch<Category>(`/categories/${id}`, input)).data
-  },
   async remove(id: string): Promise<{ ok: boolean }> {
     return (await api.delete(`/categories/${id}`)).data
   },
@@ -106,12 +100,6 @@ export const itemsApi = {
   async list(params: ItemListParams = {}): Promise<Item[]> {
     return (await api.get<Item[]>('/items', { params })).data
   },
-  async listByStatus(status: string): Promise<Item[]> {
-    return (await api.get<Item[]>('/items', { params: { status } })).data
-  },
-  async get(id: string): Promise<Item> {
-    return (await api.get<Item>(`/items/${id}`)).data
-  },
   async create(input: ItemInput): Promise<Item> {
     return (await api.post<Item>('/items', input)).data
   },
@@ -127,22 +115,9 @@ export const itemsApi = {
   async remove(id: string): Promise<{ ok: boolean }> {
     return (await api.delete(`/items/${id}`)).data
   },
-  async confirm(id: string): Promise<{ ok: boolean }> {
-    return (await api.post(`/items/${id}/confirm`)).data
-  },
-  async reject(id: string): Promise<{ ok: boolean }> {
-    return (await api.post(`/items/${id}/reject`)).data
-  },
-  async acceptSuggestion(id: string): Promise<Item> {
-    return (await api.post<Item>(`/items/${id}/accept-suggestion`)).data
-  },
   /** Link one item to a recurring rule (`ruleId: null` unlinks). */
   async linkRecurring(id: string, ruleId: string | null): Promise<{ ok: boolean }> {
     return (await api.post(`/items/${id}/link-recurring`, { rule_id: ruleId })).data
-  },
-  /** Link many items to a rule at once (`ruleId: null` unlinks). */
-  async bulkLinkRecurring(ids: string[], ruleId: string | null): Promise<{ ok: boolean; updated: number }> {
-    return (await api.post('/items/link-recurring', { ids, rule_id: ruleId })).data
   },
 }
 
@@ -203,12 +178,6 @@ export interface MonthlyCost {
   rule_count: number
 }
 
-export interface ExpectedSpend {
-  installments_cents: number
-  recurring_cents: number
-  total_cents: number
-}
-
 export interface ForecastPoint {
   month: string
   installments_cents: number
@@ -241,10 +210,6 @@ export const dashboardApi = {
   /** Top tags by expense total (spend carrying each tag, overlap allowed). */
   async tags(params: DashboardParams = {}): Promise<TagTotal[]> {
     return (await api.get<TagTotal[]>('/dashboard/tags', { params })).data
-  },
-  /** Expected spend for a future period (installments + recurring). */
-  async expected(params: DashboardParams = {}): Promise<ExpectedSpend> {
-    return (await api.get<ExpectedSpend>('/dashboard/expected', { params })).data
   },
   /** Expected spend per month for the next N months. */
   async forecast(months = 3): Promise<ForecastPoint[]> {

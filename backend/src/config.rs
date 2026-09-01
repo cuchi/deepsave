@@ -22,8 +22,6 @@ pub struct Config {
     pub deepseek_api_key: Option<String>,
     pub deepseek_base_url: String,
     pub deepseek_model: String,
-    pub deepseek_vision_model: String,
-    pub deepseek_pro_model: String,
     pub deepseek_input_price_per_m: f64,
     pub deepseek_cache_hit_price_per_m: f64,
     pub deepseek_output_price_per_m: f64,
@@ -92,14 +90,6 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "deepseek-v4-flash".to_string());
-        let deepseek_vision_model = std::env::var("DEEPSEEK_VISION_MODEL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "deepseek-v4-flash-vision-exp".to_string());
-        let deepseek_pro_model = std::env::var("DEEPSEEK_PRO_MODEL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "deepseek-v4-pro".to_string());
         let deepseek_input_price_per_m = env_f64("DEEPSEEK_INPUT_PRICE_PER_M", 0.27);
         let deepseek_cache_hit_price_per_m = env_f64("DEEPSEEK_CACHE_HIT_PRICE_PER_M", 0.07);
         let deepseek_output_price_per_m = env_f64("DEEPSEEK_OUTPUT_PRICE_PER_M", 1.10);
@@ -142,8 +132,6 @@ impl Config {
             deepseek_api_key,
             deepseek_base_url,
             deepseek_model,
-            deepseek_vision_model,
-            deepseek_pro_model,
             deepseek_input_price_per_m,
             deepseek_cache_hit_price_per_m,
             deepseek_output_price_per_m,

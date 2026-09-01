@@ -831,53 +831,6 @@ pub struct ExpectedSpend {
     pub total_cents: i64,
 }
 
-/// `GET /dashboard/expected` — expected spend for a period: future installments
-/// of in-progress purchase series + future occurrences of active recurring
-/// rules. Only dated `>= today` (what's still expected); expenses only.
-pub async fn expected(
-    State(state): State<AppState>,
-    Query(q): Query<ExpectedQuery>,
-) -> Result<Json<ExpectedSpend>, AppError> {
-    Ok(Json(
-        expected_data(&state.pool, q.date_from, q.date_to).await?,
-    ))
-}
-
-pub async fn expected_data(
-    pool: &PgPool,
-    date_from: Option<NaiveDate>,
-    date_to: Option<NaiveDate>,
-) -> Result<ExpectedSpend, AppError> {
-    let today = chrono::Utc::now().date_naive();
-    let from = date_from.map(|d| d.max(today)).unwrap_or(today);
-    let to = date_to.unwrap_or(today);
-    if to < from {
-        return Ok(ExpectedSpend {
-            installments_cents: 0,
-            recurring_cents: 0,
-            total_cents: 0,
-        });
-    }
-
-    let (installments, recurring) = future_events(pool, today, to).await?;
-    let installments_cents = installments
-        .iter()
-        .filter(|(d, _)| *d >= from)
-        .map(|(_, a)| a)
-        .sum::<i64>();
-    let recurring_cents = recurring
-        .iter()
-        .filter(|(d, _)| *d >= from)
-        .map(|(_, a)| a)
-        .sum::<i64>();
-    Ok(ExpectedSpend {
-        installments_cents,
-        recurring_cents,
-        total_cents: installments_cents + recurring_cents,
-    })
-}
-
-/// All dated future expense events (parcels + recurrences) between `today` and
 /// `limit`, inclusive. Shared by the expected KPI, the monthly forecast and the
 /// upcoming feed.
 async fn future_events(
