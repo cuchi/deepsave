@@ -2,6 +2,7 @@ import { FormEvent, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { authApi } from '../api/client'
+import Logo from '../components/Logo'
 
 export default function Login() {
   const [password, setPassword] = useState('')
@@ -31,7 +32,10 @@ export default function Login() {
         onSubmit={submit}
         className="w-full max-w-sm space-y-4 rounded-lg border border-zinc-800 bg-zinc-900 p-6"
       >
-        <h1 className="text-xl font-bold tracking-tight">DeepSave</h1>
+        <div className="flex items-center gap-2">
+          <Logo className="h-7 w-7" />
+          <h1 className="text-xl font-bold tracking-tight">DeepSave</h1>
+        </div>
         <p className="text-sm text-zinc-400">Entre com sua senha</p>
         <input
           type="password"

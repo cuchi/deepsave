@@ -921,7 +921,9 @@ pub struct ForecastPoint {
 }
 
 /// `GET /dashboard/forecast?months=N` — expected spend per month for the next
-/// N months (parcels + recurrences). Filter-free; expenses only; dates >= today.
+/// N months (parcels + recurrences), starting with the current month. The
+/// current month's bucket only holds obligations still ahead (dates >= today).
+/// Filter-free; expenses only.
 pub async fn forecast(
     State(state): State<AppState>,
     Query(q): Query<ForecastQuery>,
@@ -934,11 +936,10 @@ pub async fn forecast(
 pub async fn forecast_data(pool: &PgPool, months: i32) -> Result<Vec<ForecastPoint>, AppError> {
     let months = months.clamp(1, 24);
     let today = chrono::Utc::now().date_naive();
-    // The forecast covers the NEXT months — the current month is already
-    // partially spent/known, so it starts at the first day of next month.
-    let first = (NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap())
-        .checked_add_months(chrono::Months::new(1))
-        .unwrap();
+    // The forecast starts with the CURRENT month: its bucket only receives
+    // future events (dates >= today), so it shows what's still expected for
+    // the month, and the following buckets are full months.
+    let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
     let last_first = first
         .checked_add_months(chrono::Months::new(months as u32 - 1))
         .unwrap();

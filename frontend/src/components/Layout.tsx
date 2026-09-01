@@ -2,11 +2,11 @@ import { useState } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { authApi } from '../api/client'
+import Logo from './Logo'
 
 const NAV_LINKS = [
   { to: '/', label: 'Gráficos' },
   { to: '/lista', label: 'Lista' },
-  { to: '/forecast', label: 'Previsão' },
   { to: '/memory', label: 'Memória' },
   { to: '/recurring', label: 'Recorrentes' },
   { to: '/system', label: 'Sistema' },
@@ -39,8 +39,9 @@ export default function Layout() {
             <Link
               to={withParams('/')}
               onClick={closeMenu}
-              className="shrink-0 text-lg font-bold tracking-tight"
+              className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-tight"
             >
+              <Logo className="h-6 w-6" />
               DeepSave
             </Link>
             {/* Desktop nav */}

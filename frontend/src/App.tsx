@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query'
 import { authApi } from './api/client'
 import Login from './pages/Login'
 import Charts from './pages/Charts'
-import Forecast from './pages/Forecast'
 import Lista from './pages/Lista'
 import Memory from './pages/Memory'
 import Recurring from './pages/Recurring'
@@ -35,7 +34,8 @@ export default function App() {
       />
       <Route element={authed ? <Layout /> : <Navigate to="/login" replace />}>
         <Route path="/" element={<Charts />} />
-        <Route path="/forecast" element={<Forecast />} />
+        {/* Merged into Gráficos — keep old links working. */}
+        <Route path="/forecast" element={<Navigate to="/" replace />} />
         <Route path="/lista" element={<Lista />} />
         <Route path="/categories" element={<Navigate to="/memory" replace />} />
         <Route path="/memory" element={<Memory />} />

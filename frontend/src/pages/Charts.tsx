@@ -11,6 +11,7 @@ import {
   type DailyPoint,
   type TagTotal,
   type TrendPoint,
+  type UpcomingItem,
 } from '../api/client'
 import { currentMonth, currentMonthRange, fmtCents } from '../lib/format'
 import ItemFilters, { useFiltersUrl, type ItemFiltersValue } from '../components/ItemFilters'
@@ -53,6 +54,85 @@ function dashboardParams(f: ItemFiltersValue) {
     bank: f.bankFilter || undefined,
     kind: f.kindFilter || undefined,
     installments: f.installments === 'all' ? undefined : f.installments,
+  }
+}
+
+// ---------- Previsão (merged from the old Forecast page) ----------
+
+const HORIZONS = [30, 60, 90, 180] as const
+const DEFAULT_HORIZON = 90
+
+function dayShort(ymd: string): string {
+  return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`
+}
+
+function monthTitle(ym: string): string {
+  const [y, m] = ym.split('-').map(Number)
+  return new Date(y, m - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
+}
+
+function monthTotals(items: UpcomingItem[]) {
+  let parcel = 0
+  let rec = 0
+  for (const i of items) {
+    if (i.kind === 'parcel') parcel += i.amount_cents
+    else rec += i.amount_cents
+  }
+  return { parcel, rec, total: parcel + rec }
+}
+
+function forecastOption(points: { month: string; installments_cents: number; recurring_cents: number }[]): EChartsCoreOption {
+  return {
+    textStyle: AXIS_TEXT,
+    tooltip: {
+      trigger: 'axis',
+      ...TOOLTIP_BASE,
+      formatter: (ps: unknown) => {
+        const arr = (Array.isArray(ps) ? ps : [ps]) as {
+          axisValue?: string
+          marker: string
+          seriesName: string
+          value: number
+        }[]
+        let total = 0
+        const lines = arr.map((p) => {
+          total += p.value
+          return `${p.marker} ${p.seriesName}: <b>${fmtCents(p.value)}</b>`
+        })
+        const title = arr[0]?.axisValue ? monthTitle(arr[0].axisValue) : ''
+        return `<div style="font-weight:600;margin-bottom:4px">${title}</div>${lines.join('<br/>')}<br/><b>Total: ${fmtCents(total)}</b>`
+      },
+    },
+    legend: { top: 0, textStyle: AXIS_TEXT },
+    grid: { left: 8, right: 12, top: 34, bottom: 0, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: points.map((p) => `${p.month.slice(5, 7)}/${p.month.slice(0, 4)}`),
+      axisLine: { lineStyle: { color: '#3f3f46' } },
+      axisTick: { show: false },
+      axisLabel: AXIS_LABEL,
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: { ...AXIS_LABEL, formatter: fmtShort },
+      splitLine: SPLIT_LINE,
+    },
+    series: [
+      {
+        name: 'Parcelas',
+        type: 'bar',
+        stack: 'total',
+        data: points.map((p) => p.installments_cents),
+        itemStyle: { color: '#fbbf24' },
+      },
+      {
+        name: 'Recorrentes',
+        type: 'bar',
+        stack: 'total',
+        data: points.map((p) => p.recurring_cents),
+        itemStyle: { color: '#34d399', borderRadius: [4, 4, 0, 0] },
+      },
+    ],
   }
 }
 
@@ -525,6 +605,44 @@ export default function Charts() {
   // Count of active rules with a scheduled next date (forecast).
   const upcomingCount = recurring.filter((r) => r.is_active && r.next_due_on).length
 
+  // Previsão (merged from the old Forecast page): future obligations.
+  const [horizon, setHorizon] = useState<number>(DEFAULT_HORIZON)
+  const forecastMonths = Math.max(1, Math.ceil(horizon / 30))
+  const { data: monthlyCost } = useQuery({
+    queryKey: ['recurring-monthly-cost'],
+    queryFn: recurringApi.monthlyCost,
+  })
+  const { data: forecast = [] } = useQuery({
+    queryKey: ['dashboard-forecast', forecastMonths],
+    queryFn: () => dashboardApi.forecast(forecastMonths),
+  })
+  const { data: upcoming = [] } = useQuery({
+    queryKey: ['dashboard-upcoming', horizon],
+    queryFn: () => dashboardApi.upcoming(horizon),
+  })
+
+  const forecastTotals = useMemo(() => {
+    let installments = 0
+    let recurring = 0
+    for (const u of upcoming) {
+      if (u.kind === 'parcel') installments += u.amount_cents
+      else recurring += u.amount_cents
+    }
+    return { installments, recurring, total: installments + recurring }
+  }, [upcoming])
+
+  // Breakdown grouped by month, with per-month subtotals.
+  const byMonth = useMemo(() => {
+    const map = new Map<string, UpcomingItem[]>()
+    for (const u of upcoming) {
+      const k = u.date.slice(0, 7)
+      const list = map.get(k) ?? []
+      list.push(u)
+      map.set(k, list)
+    }
+    return [...map.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  }, [upcoming])
+
 
   const rangeLabel = useMemo(() => {
     if (!filters.dateFrom && !filters.dateTo) {
@@ -727,13 +845,133 @@ export default function Charts() {
               )}
             </div>
 
-            <p className="text-center text-xs text-zinc-600">
-              <Link to={`/lista${location.search}`} className="hover:text-zinc-300">
-                Ver todos os itens na Lista →
-              </Link>
-            </p>
           </div>
       </div>
+
+      <div className="mb-4 rounded border border-zinc-800 bg-zinc-900">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3 text-sm font-medium">
+          <span>Previsão</span>
+          <div className="flex flex-wrap items-center gap-1">
+            {HORIZONS.map((h) => (
+              <button
+                key={h}
+                type="button"
+                onClick={() => setHorizon(h)}
+                className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                  horizon === h
+                    ? 'bg-zinc-100 text-zinc-900'
+                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                }`}
+              >
+                {h} dias
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="space-y-4 border-t border-zinc-800 p-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
+              <p className="text-xs text-zinc-500">
+                Recorrência mensal <span className="text-zinc-600">(global)</span>
+              </p>
+              <p className="text-lg font-semibold tabular-nums">
+                {fmtCents(monthlyCost?.monthly_cents ?? 0)}
+                <span className="text-xs font-normal text-zinc-500">/mês</span>
+              </p>
+              <p className="text-[11px] text-zinc-600">{monthlyCost?.rule_count ?? 0} regras ativas</p>
+            </div>
+            <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
+              <p className="text-xs text-zinc-500">Gastos esperados ({horizon} dias)</p>
+              <p className="text-lg font-semibold tabular-nums text-amber-300">
+                {fmtCents(forecastTotals.total)}
+              </p>
+              <p className="text-[11px] text-zinc-600">
+                parcelas {fmtCents(forecastTotals.installments)} · recorrentes{' '}
+                {fmtCents(forecastTotals.recurring)}
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
+            <h2 className="mb-2 text-sm font-medium text-zinc-400">Gastos esperados por mês</h2>
+            {forecast.length === 0 ? (
+              <p className="py-8 text-center text-sm text-zinc-600">Sem dados</p>
+            ) : (
+              <EChart option={forecastOption(forecast)} height={260} />
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded border border-zinc-800 bg-zinc-900">
+        <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3 text-sm font-medium">
+          <span>Detalhamento</span>
+          <span className="text-xs font-normal text-zinc-500">
+            {upcoming.length} item{upcoming.length === 1 ? '' : 's'}
+          </span>
+        </div>
+        <div className="divide-y divide-zinc-900">
+          {byMonth.length === 0 ? (
+            <p className="px-4 py-8 text-center text-sm text-zinc-600">
+              Nada esperado nos próximos {horizon} dias.
+            </p>
+          ) : (
+            byMonth.map(([ym, items]) => {
+              const t = monthTotals(items)
+              return (
+                <div key={ym} className="px-4 py-2">
+                  <div className="flex flex-wrap items-baseline gap-2 py-1 text-sm">
+                    <span className="font-medium capitalize">{monthTitle(ym)}</span>
+                    <span className="text-xs tabular-nums text-zinc-500">
+                      total {fmtCents(t.total)} · parcelas {fmtCents(t.parcel)} · recorrentes{' '}
+                      {fmtCents(t.rec)}
+                    </span>
+                  </div>
+                  {items.map((u, i) => (
+                    <div
+                      key={`${u.date}-${u.kind}-${i}`}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-zinc-800/60 py-1.5 text-sm first:border-t-0"
+                    >
+                      <span className="w-10 shrink-0 text-xs tabular-nums text-zinc-500">
+                        {dayShort(u.date)}
+                      </span>
+                      <span
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${
+                          u.kind === 'parcel'
+                            ? 'bg-amber-500/15 text-amber-300'
+                            : 'bg-emerald-500/15 text-emerald-300'
+                        }`}
+                      >
+                        {u.kind === 'parcel' ? `Parcela ${u.progress ?? ''}` : 'Recorrente'}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate" title={u.description}>
+                        {u.description}
+                      </span>
+                      {u.category_name && (
+                        <span className="shrink-0 text-xs text-zinc-500">{u.category_name}</span>
+                      )}
+                      <span className="shrink-0 text-sm tabular-nums">
+                        {fmtCents(u.amount_cents)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )
+            })
+          )}
+        </div>
+      </div>
+
+      <p className="mt-3 text-center text-[11px] text-zinc-600">
+        Estimativa: parcelas iguais (baseado no valor da última parcela) · detecção de
+        parcelamento apenas em faturas C6 · recorrentes conforme regras ativas.
+      </p>
+
+      <p className="mt-4 text-center text-xs text-zinc-600">
+        <Link to={`/lista${location.search}`} className="hover:text-zinc-300">
+          Ver todos os itens na Lista →
+        </Link>
+      </p>
     </div>
   )
 }
