@@ -11,7 +11,7 @@ use crate::models::{BulkItemUpdate, Item, ItemInput, ItemSummary, TagsMode};
 use crate::services::tags;
 use crate::AppState;
 
-pub(crate) const ITEM_COLS: &str = "id, parent_id, document_id, source, kind, status, account_id, \
+pub(crate) const ITEM_COLS: &str = "id, document_id, source, kind, status, account_id, \
      transfer_group_id, installment, installment_count, recurring_id, occurred_on, posted_on, \
      merchant, description, amount_cents, currency, category_id, suggested_category, tags, raw_line, \
      match_confidence, created_at, updated_at, \
@@ -165,7 +165,7 @@ pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppEr
     let category_ids = split_filters(&q.category_ids);
     let tags = split_filters(&q.tags);
     let items = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
-        "SELECT id, parent_id, document_id, source, kind, status, account_id, transfer_group_id,
+        "SELECT id, document_id, source, kind, status, account_id, transfer_group_id,
                 installment, installment_count, recurring_id, occurred_on, posted_on, merchant,
                 description, {AMOUNT_ADJ} AS amount_cents, currency, category_id,
                 suggested_category, tags, raw_line, match_confidence, created_at, updated_at,
@@ -205,8 +205,7 @@ pub async fn list_items(pool: &PgPool, q: &ListQuery) -> Result<Vec<Item>, AppEr
 }
 
 /// Filtered summary (count + net total) for the same filters as [`list_items`].
-/// Sums **root** items only (`parent_id IS NULL`) — receipt children are
-/// allocations of their parent and would double-count. Ignores `sort`/`limit`.
+/// Ignores `sort`/`limit`.
 pub async fn summary(pool: &PgPool, q: &ListQuery) -> Result<ItemSummary, AppError> {
     let (start, end) = month_range(q.month.as_deref())?;
     let category_ids = split_filters(&q.category_ids);
@@ -215,7 +214,7 @@ pub async fn summary(pool: &PgPool, q: &ListQuery) -> Result<ItemSummary, AppErr
         "SELECT count(*)::bigint AS count,
                 COALESCE(SUM({AMOUNT_ADJ}), 0)::bigint AS total_cents
          FROM items
-         WHERE parent_id IS NULL AND {ITEM_FILTERS}"
+         WHERE {ITEM_FILTERS}"
     )))
     .bind(start)
     .bind(end)
@@ -402,12 +401,11 @@ pub async fn create(
     }
     let item = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
         "INSERT INTO items
-           (parent_id, kind, account_id, installment, installment_count, occurred_on,
+           (kind, account_id, installment, installment_count, occurred_on,
             merchant, description, amount_cents, currency, category_id, tags, source, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'manual', 'confirmed')
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'manual', 'confirmed')
          RETURNING {ITEM_COLS}"
     )))
-    .bind(input.parent_id)
     .bind(&input.kind)
     .bind(input.account_id)
     .bind(input.installment)
@@ -442,14 +440,13 @@ pub async fn update(
 
     let item = sqlx::query_as::<_, Item>(sqlx::AssertSqlSafe(format!(
         "UPDATE items
-         SET parent_id = $1, kind = $2, account_id = $3, installment = $4,
-             installment_count = $5, occurred_on = $6, merchant = $7, description = $8,
-             amount_cents = $9, currency = $10, category_id = $11, tags = $12,
+         SET kind = $1, account_id = $2, installment = $3,
+             installment_count = $4, occurred_on = $5, merchant = $6, description = $7,
+             amount_cents = $8, currency = $9, category_id = $10, tags = $11,
              updated_at = now()
-         WHERE id = $13
+         WHERE id = $12
          RETURNING {ITEM_COLS}"
     )))
-    .bind(input.parent_id)
     .bind(&input.kind)
     .bind(input.account_id)
     .bind(input.installment)

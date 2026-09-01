@@ -9,7 +9,6 @@ export interface Category {
 
 export interface Item {
   id: string
-  parent_id: string | null
   document_id: string | null
   source: string
   kind: string

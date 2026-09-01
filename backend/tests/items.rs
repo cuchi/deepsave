@@ -99,26 +99,13 @@ async fn exclude_installments_keeps_only_first_parcel(pool: PgPool) {
 #[sqlx::test]
 async fn summary_sums_roots_only_and_respects_filters(pool: PgPool) {
     common::migrate(&pool).await;
-    let root: sqlx::types::Uuid = sqlx::query_scalar(
-        "INSERT INTO items (source, kind, status, occurred_on, description, amount_cents)
-         VALUES ('manual', 'expense', 'confirmed', '2026-07-01', 'Compra mercado', -5000)
-         RETURNING id",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    // A receipt child (linked → parent_id set): must NOT double-count.
+    insert_item(&pool, "Compra mercado", -5000, None, None).await;
     insert_item(&pool, "Linha do recibo", -3000, None, None).await;
-    sqlx::query("UPDATE items SET parent_id = $1 WHERE description = 'Linha do recibo'")
-        .bind(root)
-        .execute(&pool)
-        .await
-        .unwrap();
     insert_item(&pool, "Receita pix", 1000, None, None).await;
 
     let s = summary(&pool, &base_query()).await.unwrap();
-    assert_eq!(s.count, 2); // root + income (child excluded)
-    assert_eq!(s.total_cents, -4000);
+    assert_eq!(s.count, 3);
+    assert_eq!(s.total_cents, -7000);
 
     // Search narrows it down.
     let mut q = base_query();

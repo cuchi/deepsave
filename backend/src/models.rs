@@ -8,7 +8,6 @@ use uuid::Uuid;
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Category {
     pub id: Uuid,
-    pub parent_id: Option<Uuid>,
     pub name: String,
     pub color: Option<String>,
     pub icon: Option<String>,
@@ -44,7 +43,6 @@ fn default_currency() -> String {
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Item {
     pub id: Uuid,
-    pub parent_id: Option<Uuid>,
     pub document_id: Option<Uuid>,
     pub source: String,
     pub kind: String,
@@ -81,7 +79,6 @@ pub struct Item {
 
 #[derive(Debug, Deserialize)]
 pub struct ItemInput {
-    pub parent_id: Option<Uuid>,
     #[serde(default = "default_kind")]
     pub kind: String,
     #[serde(default)]

@@ -57,18 +57,7 @@ async fn dashboard_counts_roots_only_and_excludes_rejected(pool: PgPool) {
     common::migrate(&pool).await;
     insert_item(&pool, "Compra", -5000, "2026-07-10", "expense").await;
     // Receipt child (double-count guard): linked under the root.
-    let root_id: sqlx::types::Uuid = sqlx::query_scalar(
-        "SELECT id FROM items WHERE description = 'Compra'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
     insert_item(&pool, "Linha do recibo", -3000, "2026-07-10", "expense").await;
-    sqlx::query("UPDATE items SET parent_id = $1 WHERE description = 'Linha do recibo'")
-        .bind(root_id)
-        .execute(&pool)
-        .await
-        .unwrap();
     insert_item(&pool, "Salário", 20000, "2026-07-05", "income").await;
     insert_item(&pool, "Lixo", -100, "2026-07-01", "expense").await;
     sqlx::query("UPDATE items SET status = 'rejected' WHERE description = 'Lixo'")
@@ -77,8 +66,8 @@ async fn dashboard_counts_roots_only_and_excludes_rejected(pool: PgPool) {
         .unwrap();
 
     let d = dashboard_data(&pool, &dash_q()).await.unwrap();
-    // Child + rejected excluded; spend = 5000 (root), income = 20000.
-    assert_eq!(d.total_spend_cents, 5000);
+    // Rejected excluded; spend = 5000 + 3000 (both expenses), income = 20000.
+    assert_eq!(d.total_spend_cents, 8000);
     assert_eq!(d.total_income_cents, 20000);
 }
 
@@ -176,20 +165,9 @@ async fn daily_stacks_expenses_by_category(pool: PgPool) {
         .await
         .unwrap();
     }
-    let parent: sqlx::types::Uuid =
-        sqlx::query_scalar("SELECT id FROM items WHERE description = 'a1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    sqlx::query("UPDATE items SET parent_id = $1 WHERE description = 'child'")
-        .bind(parent)
-        .execute(&pool)
-        .await
-        .unwrap();
-
     let q = daily_q().await;
     let rows = daily_data(&pool, &q).await.unwrap();
-    // Only expense roots on that day: a1+a2 = 300, b1 = 50. Income + child excluded.
+    // Expenses on that day: a1+a2 = 300, child = 50, b1 = 50. Income excluded.
     let by_key: std::collections::HashMap<_, _> = rows
         .iter()
         .map(|r| (r.key.clone().unwrap_or_default(), r.total_cents))
@@ -197,12 +175,12 @@ async fn daily_stacks_expenses_by_category(pool: PgPool) {
     assert_eq!(by_key.get("Alimentação (teste)"), Some(&300));
     assert_eq!(by_key.get("Transporte (teste)"), Some(&50));
 
-    // stack_by=none → single per-day total.
+    // stack_by=none → single per-day total (child included: 300 + 50 + 77).
     let mut q = daily_q().await;
     q.stack_by = "none".to_string();
     let rows = daily_data(&pool, &q).await.unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].total_cents, 350);
+    assert_eq!(rows[0].total_cents, 427);
     assert_eq!(rows[0].key, None);
 
     // Top tags: item with two tags counts in both.

@@ -23,7 +23,6 @@ const LIST_LIMIT = 500
 
 interface FormState {
   open: boolean
-  parent?: Item | null
   editing?: Item | null
 }
 
@@ -254,63 +253,19 @@ export default function Lista() {
   const catById = new Map(categories.map((c) => [c.id, c]))
   const bankByDoc = new Map<string, string | undefined>()
 
-  const byParent = new Map<string | null, Item[]>()
-  for (const it of visibleItems) {
-    const k = it.parent_id
-    if (!byParent.has(k)) byParent.set(k, [])
-    byParent.get(k)!.push(it)
-  }
-  const childSum = new Map<string, number>()
-  for (const it of visibleItems) {
-    if (it.parent_id) {
-      childSum.set(it.parent_id, (childSum.get(it.parent_id) ?? 0) + Math.abs(it.amount_cents))
-    }
-  }
-  const roots = visibleItems.filter((i) => i.parent_id === null)
+  const roots = visibleItems
   const rootIds = roots.map((r) => r.id)
   const allSelected = roots.length > 0 && roots.every((r) => selected.has(r.id))
   const totalLabel = summary
     ? `${summary.total_cents > 0 ? '+' : summary.total_cents < 0 ? '−' : ''}${fmtCents(summary.total_cents)}`
     : '—'
 
-  const renderSubItem = (c: Item) => (
-    <div
-      key={c.id}
-      className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-zinc-800/60 py-1 first:border-t-0"
-    >
-      <span className="min-w-0 flex-1 truncate text-xs text-zinc-300">{c.description}</span>
-      {c.tags.length > 0 && (
-        <span className="flex shrink-0 items-center gap-1">
-          {c.tags.slice(0, 3).map((t) => (
-            <span
-              key={t}
-              className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
-            >
-              {t}
-            </span>
-          ))}
-          {c.tags.length > 3 && (
-            <span className="text-[10px] text-zinc-600">+{c.tags.length - 3}</span>
-          )}
-        </span>
-      )}
-      <span className={`shrink-0 text-xs tabular-nums ${amountColor(c.amount_cents)}`}>
-        {signOf(c.amount_cents)}
-        {fmtCents(c.amount_cents)}
-      </span>
-    </div>
-  )
-
   const renderRoot = (it: Item) => {
-    const children = byParent.get(it.id) ?? []
-    const hasChildren = children.length > 0
     const cat = it.category_id ? catById.get(it.category_id) : undefined
     const bank = it.bank ?? (it.document_id ? bankByDoc.get(it.document_id) : undefined)
     const kindLabel = KIND_LABELS[it.kind]
     const open = menuFor === it.id
     const detailsOpen = detailsFor === it.id
-    const allocated = childSum.get(it.id) ?? 0
-    const remainder = Math.abs(it.amount_cents) - allocated
     const legacy = !it.external_id && it.source !== 'pluggy'
     const sug = sugByItem.get(it.id)
 
@@ -363,11 +318,6 @@ export default function Lista() {
           {it.installment_count != null && (
             <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
               {it.installment ?? '?'}/{it.installment_count}
-            </span>
-          )}
-          {hasChildren && (
-            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
-              {children.length} itens
             </span>
           )}
           {kindLabel && (
@@ -473,15 +423,6 @@ export default function Lista() {
                   Editar
                 </button>
                 <button
-                  onClick={() => {
-                    setMenuFor(null)
-                    setForm({ open: true, parent: it })
-                  }}
-                  className="block w-full px-3 py-1.5 text-left text-sm hover:bg-zinc-800"
-                >
-                  Adicionar sub-item
-                </button>
-                <button
                   onClick={() => openLinkPicker(it.id)}
                   className="block w-full px-3 py-1.5 text-left text-sm hover:bg-zinc-800"
                 >
@@ -546,16 +487,6 @@ export default function Lista() {
 
         {detailsOpen && (
           <div className="mb-1 rounded border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-400">
-            {hasChildren && (
-              <div className="mb-2">
-                {children.map(renderSubItem)}
-                {remainder !== 0 && (
-                  <div className="mt-1 text-right text-[11px] text-amber-400/80">
-                    não alocado: {fmtCents(remainder)}
-                  </div>
-                )}
-              </div>
-            )}
             <p className="mb-1 whitespace-pre-wrap text-zinc-300">{it.description}</p>
             {it.merchant && <p>Comerciante: {it.merchant}</p>}
             {it.tags.length > 0 && (
@@ -586,11 +517,9 @@ export default function Lista() {
     )
   }
 
-  const formMonth = form.parent
-    ? form.parent.occurred_on.slice(0, 7)
-    : form.editing
-      ? form.editing.occurred_on.slice(0, 7)
-      : currentMonth()
+  const formMonth = form.editing
+    ? form.editing.occurred_on.slice(0, 7)
+    : currentMonth()
 
   return (
     <div className="pb-20">
@@ -758,7 +687,6 @@ export default function Lista() {
       {form.open && (
         <ItemForm
           month={formMonth}
-          parent={form.parent}
           editing={form.editing}
           onClose={() => {
             setForm({ open: false })

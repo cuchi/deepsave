@@ -486,11 +486,11 @@ pub async fn import_account_transactions(
         // Pluggy fields, never user data).
         let inserted: Option<(Uuid, bool)> = sqlx::query_as(
             "INSERT INTO items
-               (parent_id, document_id, source, kind, status, account_id,
+               (document_id, source, kind, status, account_id,
                 installment, installment_count, occurred_on, merchant, description,
                 amount_cents, currency, category_id, tags, raw_line, external_id,
                 pluggy_category, mcc, operation_type, payment_method)
-             VALUES (NULL, NULL, 'pluggy', $1, 'confirmed', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+             VALUES (NULL, 'pluggy', $1, 'confirmed', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                      $14, $15, $16, $17)
              ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO UPDATE SET
                pluggy_category = EXCLUDED.pluggy_category,

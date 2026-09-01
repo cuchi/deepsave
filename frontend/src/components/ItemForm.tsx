@@ -13,12 +13,11 @@ const KIND_OPTIONS: [string, string][] = [
 
 interface Props {
   month: string
-  parent?: Item | null
   editing?: Item | null
   onClose: () => void
 }
 
-export default function ItemForm({ month, parent, editing, onClose }: Props) {
+export default function ItemForm({ month, editing, onClose }: Props) {
   const { data: categories = [] } = useQuery({
     queryKey: ['categories'],
     queryFn: categoriesApi.list,
@@ -58,7 +57,6 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
     if (editing) {
       // Category, tags and kind are editable on an existing item; the rest is fixed.
       input = {
-        parent_id: editing.parent_id,
         kind,
         account_id: editing.account_id,
         installment: editing.installment,
@@ -80,7 +78,6 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
       const amountCents = Math.round(parsed * 100)
       const signed = kind === 'expense' ? -Math.abs(amountCents) : Math.abs(amountCents)
       input = {
-        parent_id: parent?.id ?? null,
         kind,
         occurred_on: date,
         merchant: merchant || null,
@@ -114,11 +111,7 @@ export default function ItemForm({ month, parent, editing, onClose }: Props) {
         className="w-full max-w-md space-y-3 rounded-lg border border-zinc-800 bg-zinc-900 p-5"
       >
         <h2 className="font-semibold">
-          {isEditing
-            ? 'Editar item'
-            : parent
-              ? `Sub-item de “${parent.description}”`
-              : 'Novo item'}
+          {isEditing ? 'Editar item' : 'Novo item'}
         </h2>
 
         {isEditing ? (

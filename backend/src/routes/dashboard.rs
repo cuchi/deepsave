@@ -62,7 +62,6 @@ pub struct Dashboard {
     pub total_income_cents: i64,
     pub by_category: Vec<CategoryTotal>,
     pub top_merchants: Vec<MerchantTotal>,
-    pub pending_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,7 +206,7 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
                 COALESCE(SUM(CASE WHEN items.kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
          FROM items
          {REFUND_JOIN}
-         WHERE items.parent_id IS NULL AND {AGG_FILTERS}"
+         WHERE {AGG_FILTERS}"
     )))
     .bind(from)
     .bind(to)
@@ -226,7 +225,7 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
          FROM items
          {REFUND_JOIN}
          JOIN categories c ON c.id = {BUCKET_CAT}
-         WHERE items.parent_id IS NULL AND {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
+         WHERE {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
          GROUP BY c.id, c.name, c.color
          ORDER BY total_cents DESC"
     )))
@@ -245,7 +244,7 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
         "SELECT {BUCKET_MERCHANT} AS merchant, SUM(-{AGG_AMOUNT_ADJ})::bigint AS total_cents
          FROM items
          {REFUND_JOIN}
-         WHERE items.parent_id IS NULL AND {EXPENSE_OR_REFUND} AND {BUCKET_MERCHANT} IS NOT NULL
+         WHERE {EXPENSE_OR_REFUND} AND {BUCKET_MERCHANT} IS NOT NULL
            AND {AGG_FILTERS}
          GROUP BY {BUCKET_MERCHANT}
          ORDER BY total_cents DESC
@@ -262,18 +261,12 @@ pub async fn dashboard_data(pool: &PgPool, q: &DashboardQuery) -> Result<Dashboa
     .fetch_all(pool)
     .await?;
 
-    let pending_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM items WHERE status = 'pending_review'")
-            .fetch_one(pool)
-            .await?;
-
     Ok(Dashboard {
         month: label,
         total_spend_cents: spend,
         total_income_cents: income,
         by_category,
         top_merchants,
-        pending_count,
     })
 }
 
@@ -436,7 +429,7 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
     let prev_end = to - Months::new(1);
     let prev_spend: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(CASE WHEN kind='expense' AND status <> 'rejected' THEN -amount_cents ELSE 0 END), 0)::bigint
-         FROM items WHERE parent_id IS NULL AND occurred_on >= $1 AND occurred_on <= $2",
+         FROM items WHERE occurred_on >= $1 AND occurred_on <= $2",
     )
     .bind(prev_start)
     .bind(prev_end)
@@ -444,7 +437,7 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
     .await?;
     let prev_income: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(CASE WHEN kind='income' AND status <> 'rejected' THEN amount_cents ELSE 0 END), 0)::bigint
-         FROM items WHERE parent_id IS NULL AND occurred_on >= $1 AND occurred_on <= $2",
+         FROM items WHERE occurred_on >= $1 AND occurred_on <= $2",
     )
     .bind(prev_start)
     .bind(prev_end)
@@ -503,7 +496,7 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
         "SELECT COALESCE(NULLIF(merchant, ''), description), c.name, i.tags, i.kind,
                     i.installment, i.installment_count, i.amount_cents
              FROM items i LEFT JOIN categories c ON c.id = i.category_id
-             WHERE i.parent_id IS NULL AND i.status <> 'rejected'
+             WHERE i.status <> 'rejected'
                AND i.occurred_on >= $1 AND i.occurred_on <= $2
              ORDER BY i.occurred_on LIMIT 500",
     )
@@ -670,7 +663,7 @@ pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>
                 COALESCE(SUM(CASE WHEN items.kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
          FROM items
          {REFUND_JOIN}
-         WHERE items.parent_id IS NULL AND {AGG_FILTERS}
+         WHERE {AGG_FILTERS}
          GROUP BY 1
          ORDER BY 1"
     )))
@@ -763,7 +756,7 @@ pub async fn daily_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<DailyPoint>
          FROM items
          {REFUND_JOIN}
          LEFT JOIN categories c ON c.id = {BUCKET_CAT}
-         WHERE items.parent_id IS NULL AND {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
+         WHERE {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
          GROUP BY {BUCKET_DATE}, key
          ORDER BY {BUCKET_DATE}, key"
     )))
@@ -798,7 +791,7 @@ pub async fn tags_data(pool: &PgPool, q: &DailyQuery) -> Result<Vec<TagTotal>, A
          FROM items
          {REFUND_JOIN}
          CROSS JOIN LATERAL unnest({BUCKET_TAGS}) AS tag
-         WHERE items.parent_id IS NULL AND {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
+         WHERE {EXPENSE_OR_REFUND} AND {AGG_FILTERS}
          GROUP BY tag
          ORDER BY total_cents DESC
          LIMIT 10"

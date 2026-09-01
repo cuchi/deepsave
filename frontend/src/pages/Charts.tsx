@@ -592,10 +592,6 @@ export default function Charts() {
                 </p>
               </div>
               <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-                <p className="text-xs text-zinc-500">Pendentes</p>
-                <p className="text-lg font-semibold tabular-nums text-amber-400">{dash?.pending_count ?? 0}</p>
-              </div>
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
                 <p className="text-xs text-zinc-500">Recorrentes</p>
                 <p className="text-lg font-semibold tabular-nums text-cyan-400">{upcomingCount}</p>
               </div>

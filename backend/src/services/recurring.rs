@@ -148,22 +148,18 @@ pub async fn validate_entries(
 /// merchant (fallback: description), exact normalized equality. Manual links,
 /// receipts, installments and non-confirmed items are skipped.
 pub async fn link_item(pool: &PgPool, item_id: Uuid) -> Result<()> {
-    let row: Option<(Option<Uuid>, Option<String>, String, String, Option<Uuid>, Option<i32>, bool)> =
+    let row: Option<(Option<String>, String, String, Option<Uuid>, Option<i32>, bool)> =
         sqlx::query_as(
-            "SELECT parent_id, merchant, description, status, recurring_id, installment_count, linked_manually
+            "SELECT merchant, description, status, recurring_id, installment_count, linked_manually
              FROM items WHERE id = $1",
         )
         .bind(item_id)
         .fetch_optional(pool)
         .await?;
-    let Some((parent_id, merchant, description, status, current_rule, installment_count, linked)) = row else {
+    let Some((merchant, description, status, current_rule, installment_count, linked)) = row else {
         return Ok(());
     };
-    if parent_id.is_some()
-        || status != "confirmed"
-        || linked
-        || installment_count.unwrap_or(0) > 1
-    {
+    if status != "confirmed" || linked || installment_count.unwrap_or(0) > 1 {
         return Ok(());
     }
 
@@ -222,7 +218,7 @@ pub async fn relink_rule(pool: &PgPool, rule_id: Uuid) -> Result<()> {
     // 2/3. Load candidates once, match in Rust (normalized exact).
     let rows: Vec<(Uuid, Option<String>, String, bool, Option<Uuid>)> = sqlx::query_as(
         "SELECT id, merchant, description, linked_manually, recurring_id FROM items
-         WHERE status = 'confirmed' AND parent_id IS NULL
+         WHERE status = 'confirmed'
            AND (installment_count IS NULL OR installment_count <= 1)",
     )
     .fetch_all(pool)

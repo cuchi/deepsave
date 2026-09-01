@@ -41,7 +41,6 @@ cd frontend && npm run build       # type-check + build frontend
 ## Conventions & gotchas
 
 - **Amounts**: integer cents, **negative = expense, positive = income** (`items.amount_cents`).
-- **Tree**: `items.parent_id` self-reference; receipt lines are children of statement items.
 - **sqlx 0.9 specifics**:
   - Non-literal SQL must be wrapped in `sqlx::AssertSqlSafe(...)`; prefer `&'static str` consts.
   - `Uuid` mapping requires the sqlx `uuid` feature (already enabled).

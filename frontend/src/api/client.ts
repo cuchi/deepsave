@@ -54,7 +54,6 @@ export const categoriesApi = {
 }
 
 export interface ItemInput {
-  parent_id?: string | null
   kind?: string
   account_id?: string | null
   installment?: number | null
@@ -139,7 +138,6 @@ export interface DashboardData {
   total_income_cents: number
   by_category: CategoryTotal[]
   top_merchants: MerchantTotal[]
-  pending_count: number
 }
 
 export interface TrendPoint {
