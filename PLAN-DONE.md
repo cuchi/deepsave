@@ -223,7 +223,7 @@ forecast/analytics constructs that **link to real items**:
   merchant is null. At most one rule per item (alias uniqueness + single target).
   Excludes installments, receipt children, non-confirmed items. Alias matching tolerates
   a trailing amount in the item name (`matches_alias`) — one alias covers varying
-  payments like "PREST HAB 1847,32" / "PREST HAB 1832,10". **Manual links win** over
+  payments like "NETFLIX 22,90" / "NETFLIX 27,90". **Manual links win** over
   auto-match.
 - **Linking runs** on item confirm, on ingest (confirmed items), on rule create/update
   (re-link), via manual `POST /items/{id}/link-recurring` (+ bulk `POST /items/link-recurring`).

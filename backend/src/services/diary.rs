@@ -1,6 +1,6 @@
 //! Diary: the user's life notes (date + comment) injected into AI prompts so
-//! the models can interpret spending context ("2025-09-01 - Me divorciei" →
-//! why the "daiana" purchases make sense).
+//! the models can interpret spending context ("2025-09-01 - Mudei de cidade" →
+//! why the "mudanca" purchases make sense).
 
 use anyhow::Result;
 use chrono::NaiveDate;

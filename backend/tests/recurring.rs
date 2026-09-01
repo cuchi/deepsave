@@ -131,18 +131,18 @@ fn matches_alias_tolerates_trailing_amount() {
     use deepsave_backend::services::recurring::matches_alias;
 
     // Exact normalized equality.
-    assert!(matches_alias("PREST HAB", "prest hab"));
+    assert!(matches_alias("ALUGUEL", "aluguel"));
 
     // Amount embedded in the name — varying mortgage/utility bills.
-    assert!(matches_alias("PREST HAB 184732", "prest hab"));
-    assert!(matches_alias("PREST HAB 1.847,32", "prest hab"));
-    assert!(matches_alias("prest hab r$ 1847,32", "prest hab"));
+    assert!(matches_alias("ALUGUEL 184732", "aluguel"));
+    assert!(matches_alias("ALUGUEL 1.847,32", "aluguel"));
+    assert!(matches_alias("aluguel r$ 1847,32", "aluguel"));
     assert!(matches_alias("CELESC DISTRIBUICAO S.A - 0829", "celesc distribuicao s.a"));
 
     // A longer real word is NOT a match (remainder must be an amount).
-    assert!(!matches_alias("PREST HABITAT", "prest hab"));
+    assert!(!matches_alias("ALUGUEL TERRENO", "aluguel"));
     // Substring in the middle is not a match (prefix only).
-    assert!(!matches_alias("MINHA PREST HAB", "prest hab"));
+    assert!(!matches_alias("MEU ALUGUEL", "aluguel"));
     // Non-amount suffixes still don't match.
     assert!(!matches_alias("NETFLIX BR", "netflix"));
     assert!(!matches_alias("LOJA CENTRO", "loja"));
@@ -153,7 +153,7 @@ async fn alias_with_amount_tolerance_links_varying_payments(pool: PgPool) {
     common::migrate(&pool).await;
     let rule = seed_rule(&pool, "Financiamento").await;
     sqlx::query(
-        "INSERT INTO recurring_aliases (rule_id, name, is_alias) VALUES ($1, 'prest hab', true)",
+        "INSERT INTO recurring_aliases (rule_id, name, is_alias) VALUES ($1, 'aluguel', true)",
     )
     .bind(rule)
     .execute(&pool)
@@ -161,9 +161,9 @@ async fn alias_with_amount_tolerance_links_varying_payments(pool: PgPool) {
     .unwrap();
 
     // Same alias, three months, different amounts embedded in the merchant name.
-    let a = seed_item(&pool, Some("PREST HAB 184732"), "financiamento", -184732, "2025-05-10").await;
-    let b = seed_item(&pool, Some("PREST HAB 183210"), "financiamento", -183210, "2025-06-10").await;
-    let c = seed_item(&pool, Some("PREST HAB 181900"), "financiamento", -181900, "2025-07-10").await;
+    let a = seed_item(&pool, Some("ALUGUEL 184732"), "financiamento", -184732, "2025-05-10").await;
+    let b = seed_item(&pool, Some("ALUGUEL 183210"), "financiamento", -183210, "2025-06-10").await;
+    let c = seed_item(&pool, Some("ALUGUEL 181900"), "financiamento", -181900, "2025-07-10").await;
     for id in [a, b, c] {
         recurring::link_item(&pool, id).await.unwrap();
         assert_eq!(link_of(&pool, id).await, (Some(rule), false));
@@ -173,10 +173,10 @@ async fn alias_with_amount_tolerance_links_varying_payments(pool: PgPool) {
 #[sqlx::test]
 async fn validate_and_relink_accept_amount_tolerant_alias(pool: PgPool) {
     common::migrate(&pool).await;
-    seed_item(&pool, Some("PREST HAB 184732"), "financiamento", -184732, "2025-05-10").await;
+    seed_item(&pool, Some("ALUGUEL 184732"), "financiamento", -184732, "2025-05-10").await;
 
     // Creating the alias passes validation even though no item matches exactly.
-    let errs = recurring::validate_entries(&pool, &["prest hab".into()], &[], None)
+    let errs = recurring::validate_entries(&pool, &["aluguel".into()], &[], None)
         .await
         .unwrap();
     assert!(errs.is_empty(), "{errs:?}");
@@ -184,13 +184,13 @@ async fn validate_and_relink_accept_amount_tolerant_alias(pool: PgPool) {
     // …and relink picks up items whose name embeds a different amount.
     let rule = seed_rule(&pool, "Financiamento").await;
     sqlx::query(
-        "INSERT INTO recurring_aliases (rule_id, name, is_alias) VALUES ($1, 'prest hab', true)",
+        "INSERT INTO recurring_aliases (rule_id, name, is_alias) VALUES ($1, 'aluguel', true)",
     )
     .bind(rule)
     .execute(&pool)
     .await
     .unwrap();
-    let item = seed_item(&pool, Some("PREST HAB 183210"), "financiamento", -183210, "2025-06-10").await;
+    let item = seed_item(&pool, Some("ALUGUEL 183210"), "financiamento", -183210, "2025-06-10").await;
     recurring::relink_rule(&pool, rule).await.unwrap();
     assert_eq!(link_of(&pool, item).await, (Some(rule), false));
 }
@@ -200,19 +200,19 @@ async fn merchants_autocomplete_includes_description_fallback(pool: PgPool) {
     common::migrate(&pool).await;
     // Merchant present → merchant is the suggestion.
     seed_item(&pool, Some("CELESC DISTRIBUICAO S.A"), "Pagamento de boleto", -8293, "2025-05-10").await;
-    // Merchant-less bill → description is the suggestion ("PREST HAB").
-    seed_item(&pool, None, "PREST HAB", -484596, "2025-05-14").await;
-    seed_item(&pool, None, "PREST HAB", -484693, "2025-06-14").await;
+    // Merchant-less bill → description is the suggestion ("ALUGUEL").
+    seed_item(&pool, None, "ALUGUEL", -484596, "2025-05-14").await;
+    seed_item(&pool, None, "ALUGUEL", -484693, "2025-06-14").await;
 
-    let names = deepsave_backend::routes::recurring::merchant_names(&pool, "prest").await.unwrap();
-    assert_eq!(names, vec!["PREST HAB"]);
+    let names = deepsave_backend::routes::recurring::merchant_names(&pool, "aluguel").await.unwrap();
+    assert_eq!(names, vec!["ALUGUEL"]);
 
     let names = deepsave_backend::routes::recurring::merchant_names(&pool, "celesc").await.unwrap();
     assert_eq!(names, vec!["CELESC DISTRIBUICAO S.A"]);
 
     // Empty query lists everything (usable on focus).
     let names = deepsave_backend::routes::recurring::merchant_names(&pool, "").await.unwrap();
-    assert!(names.contains(&"PREST HAB".to_string()));
+    assert!(names.contains(&"ALUGUEL".to_string()));
     assert!(names.contains(&"CELESC DISTRIBUICAO S.A".to_string()));
 }
 

@@ -224,7 +224,7 @@ function NameEntryEditor({
       <p className="text-[11px] text-zinc-600">
         Nomes são validados no salvamento: devem existir nos dados e aliases não podem
         se repetir entre regras. Um alias pode ignorar o valor no final do nome —
-        ex.: “prest hab” identifica “PREST HAB 1.847,32”.
+        ex.: “netflix” identifica “NETFLIX.COM 22,90”.
       </p>
     </div>
   )

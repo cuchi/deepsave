@@ -16,7 +16,7 @@ pub fn normalize_name(s: &str) -> String {
 /// embedded in the name: the normalized alias must be a prefix at a token
 /// boundary and the remainder must look like an amount (digits with optional
 /// separators, possibly prefixed by "r$"). This captures varying payments under
-/// one alias — e.g. "PREST HAB 1847,32" / "PREST HAB 1832,10" → alias "prest hab".
+/// one alias — e.g. "NETFLIX.COM 22,90" / "NETFLIX.COM 27,90" → alias "netflix".
 pub fn matches_alias(text: &str, alias: &str) -> bool {
     let n = normalize_name(text);
     let a = normalize_name(alias);
@@ -90,7 +90,7 @@ pub async fn validate_entries(
     // Names that exist in the data (merchant or description). Items store raw
     // names, so the comparison happens in Rust — same as matching. `matches_alias`
     // tolerates a trailing amount, so one alias can cover a varying payment
-    // (e.g. "PREST HAB 1847,32" / "PREST HAB 1832,10" → "prest hab").
+    // (e.g. "NETFLIX.COM 22,90" / "NETFLIX.COM 27,90" → "netflix").
     let merchants: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT merchant FROM items WHERE merchant IS NOT NULL AND merchant <> ''",
     )

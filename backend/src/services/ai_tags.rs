@@ -606,7 +606,7 @@ TAGS:
 - Prefira tags de "all_tags"; crie uma nova tag apenas se nenhuma existente encaixar bem.
 - "ex" traz exemplos reais de itens já taggeados do mesmo comerciante — use-os como referência de estilo.
 - "hist" traz o histórico das mudanças do usuário nesse comerciante — a decisão mais recente (sobre transação recente) reflete a preferência atual.
-- "diario" traz anotações do usuário sobre a vida dele — use para interpretar contextos (ex.: divórcio explica gastos com a tag "daiana").
+- "diario" traz anotações do usuário sobre a vida dele — use para interpretar contextos (ex.: uma mudança de cidade explica gastos com a tag "mudanca").
 - Metadados por item: "pc" (categoria sugerida pelo banco), "mcc" (código do comerciante: 5817/5818/5968=assinatura, 5411=supermercado, 5812=restaurante), "op" (tipo de movimento: PIX, BOLETO, PORTABILIDADE_SALARIO), "pay" (PIX/TED/DOC) — use-os como evidência (ex.: "op":"PORTABILIDADE_SALARIO" → tag "salario"; "pay":"PIX" → tag "pix")."#
         .to_string()
 }
@@ -641,7 +641,7 @@ Regras:
   * gasolina/posto → "combustivel"; farmácia → "farmacia"; pet → "pet"; saúde → "saude"
 - Use as tags de "ex" como guia de estilo e vocabulário (mesmo nível de especificidade).
 - "hist" traz o histórico das mudanças do usuário nesse comerciante (categoria/tags antes→depois, origem; "date" = quando mudou, "t_date" = quando a transação ocorreu). A decisão mais recente (sobre transação recente) reflete a preferência atual — use as tags mais recentes como referência.
-- "diario" traz anotações do usuário sobre a vida dele — use para interpretar contextos (ex.: divórcio explica gastos com a tag "daiana").
+- "diario" traz anotações do usuário sobre a vida dele — use para interpretar contextos (ex.: uma mudança de cidade explica gastos com a tag "mudanca").
 - Metadados por item: "pc" (categoria sugerida pelo banco), "mcc" (código do comerciante: 5817/5818/5968=assinatura, 5411=supermercado, 5812=restaurante), "op" (tipo de movimento: PIX, BOLETO, PORTABILIDADE_SALARIO), "pay" (PIX/TED/DOC) — use-os como evidência para as tags (ex.: "op":"PORTABILIDADE_SALARIO" → tag "salario"; "pay":"PIX" → tag "pix")."#
         .to_string()
 }
@@ -837,7 +837,7 @@ Regras:
 - Se nenhuma categoria existente encaixar bem, proponha uma nova com o prefixo "nova: " (ex.: "nova: Pet shop"). Use isso com moderação.
 - "hist" traz o histórico das mudanças que o usuário fez nesse comerciante (categoria/tags antes→depois, origem: item_edit | bulk | memory_apply | ai_apply). "date" = quando o usuário mudou; "t_date" = quando a transação aconteceu. A decisão MAIS RECENTE (e sobre transação mais recente) é a preferência atual — siga-a; mudanças em compras antigas valem menos. Se o histórico mostra trocas frequentes, seja conservador (proponha a decisão mais recente).
 - "ex" de cada item traz exemplos reais do usuário (mesma loja/descrição) já taggeados e categorizados — use a categoria e as tags deles como referência de estilo e de decisão.
-- "tag_desc" explica o significado das tags do usuário — use para interpretar o contexto do gasto (ex.: tag "daiana" = pagamentos para Daiana, então compras nessa tag são pessoais, não restaurante).
+- "tag_desc" explica o significado das tags do usuário — use para interpretar o contexto do gasto (ex.: tag "advogado" = pagamentos para o advogado, então compras nessa tag são pessoais, não restaurante).
 - Metadados por item: "pc" = categoria sugerida pelo banco (ex.: "Food delivery", "Supermarkets"); "mcc" = código de categoria do comerciante (5411=supermercado, 5812=restaurante, 5541/5542=posto, 5912=farmácia, 5817/5818/5968=assinatura, 7011=hotel); "op" = tipo de movimento (PORTABILIDADE_SALARIO=salário, RESGATE_APLIC_FINANCEIRA=investimento, PIX, BOLETO, TARIFA_SERVICOS, ENCARGOS_JUROS); "pay" = método (PIX/TED/DOC). Use-os como evidência — mcc e pc são fortes pistas da categoria.
 - Categorize TODOS os itens de "items" — inclua um índice para cada um. Mesmo com pouca informação, escolha a melhor categoria (ou proponha "nova: ").
 - Guia: supermercado → "Supermercado"; restaurante/delivery/ifood → "Restaurantes"; posto/gasolina → "Transporte"; farmácia/saúde/clínica → "Saúde"; assinatura (streaming, apps, telefone) → "Assinaturas"; aluguel/condomínio/contas de casa → "Moradia"; loja/e-commerce/roupa → "Compras" (ou a categoria mais próxima existente); lazer/viagem/hotel → "Lazer"; imposto/taxa → "Outros"; compra internacional/foreign → "Outros" (ou "nova: " se fizer sentido).

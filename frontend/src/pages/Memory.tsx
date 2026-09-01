@@ -247,7 +247,7 @@ function DiarySection() {
     <div>
       <p className="mb-4 text-sm text-zinc-500">
         Anotações sobre sua vida — a IA usa isso para entender o contexto dos seus gastos.
-        Ex.: <code>2025-09-01 · Me divorciei</code>
+        Ex.: <code>2025-09-01 · Mudei de cidade</code>
       </p>
 
       <form onSubmit={submit} className="mb-6 flex flex-wrap gap-2">

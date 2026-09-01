@@ -357,7 +357,7 @@ pub struct ProfileQuery {
 
 /// Distinct names for the alias autocomplete (items + merchant memory). The item
 /// name is the merchant when present, else the description — the same source
-/// `link_item` matches against — so merchant-less bills like "PREST HAB" show up.
+/// `link_item` matches against — so merchant-less bills like "NETFLIX.COM" show up.
 pub async fn merchant_names(pool: &PgPool, q: &str) -> Result<Vec<String>, AppError> {
     let q = q.trim().to_string();
     let mut names: Vec<String> = sqlx::query_scalar(
