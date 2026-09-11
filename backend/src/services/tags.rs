@@ -41,6 +41,18 @@ pub fn normalize_one(s: &str) -> Option<String> {
     out.pop()
 }
 
+/// Fold a string to a bare alphanumeric identity key: strip accents, lowercase,
+/// keep only alphanumerics (`Pão de Açúcar` → `paodeacucar`). Used for
+/// merchant-or-description identities (change log, AI history) so formatting
+/// differences don't split the same merchant.
+pub fn fold_key(s: &str) -> String {
+    strip_accents(s)
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
 /// Usage counts per tag across all items.
 pub async fn usage(pool: &sqlx::PgPool) -> Result<Vec<crate::models::TagUsage>, sqlx::Error> {
     sqlx::query_as::<_, crate::models::TagUsage>(

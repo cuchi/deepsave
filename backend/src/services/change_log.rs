@@ -14,10 +14,7 @@ use crate::services::tags;
 /// Normalize an item's merchant-or-description into a stable identity key
 /// (strip accents, lowercase, drop non-alphanumerics).
 pub fn merchant_key(merchant: Option<&str>, description: &str) -> String {
-    let src = merchant
-        .map(|m| tags::strip_accents(m).to_lowercase())
-        .unwrap_or_else(|| tags::strip_accents(description).to_lowercase());
-    src.chars().filter(|c| c.is_alphanumeric()).collect()
+    tags::fold_key(merchant.unwrap_or(description))
 }
 
 /// Record a change for an item (skipped when nothing actually changed).

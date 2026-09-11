@@ -1,6 +1,7 @@
 //! Tests for the filterable dashboard/trend aggregation (pool-level functions).
 
 use deepsave_backend::routes::dashboard::{dashboard_data, trend_data, DashboardQuery, TrendQuery};
+use chrono::Datelike;
 use sqlx::PgPool;
 
 mod common;
@@ -23,6 +24,7 @@ fn trend_q() -> TrendQuery {
     TrendQuery {
         months: None,
         date_to: None,
+        granularity: None,
         search: None,
         category_ids: None,
         kind: None,
@@ -102,17 +104,48 @@ async fn trend_window_ends_at_date_to(pool: PgPool) {
     q.date_to = Some("2026-07-31".parse().unwrap());
     let t = trend_data(&pool, &q).await.unwrap();
     assert_eq!(t.len(), 12);
-    assert_eq!(t.last().unwrap().month, "2026-07");
+    assert_eq!(t.last().unwrap().bucket, "2026-07");
     assert_eq!(t.last().unwrap().spend_cents, 1000);
-    assert!(!t.iter().any(|p| p.month == "2026-08"));
+    assert!(!t.iter().any(|p| p.bucket == "2026-08"));
 
     // Search filter applies to the trend (window ends at August).
     let mut q = trend_q();
     q.date_to = Some("2026-08-31".parse().unwrap());
     q.search = Some("agosto".to_string());
     let t = trend_data(&pool, &q).await.unwrap();
-    let august = t.iter().find(|p| p.month == "2026-08").unwrap();
+    let august = t.iter().find(|p| p.bucket == "2026-08").unwrap();
     assert_eq!(august.spend_cents, 2000);
+}
+
+#[sqlx::test]
+async fn trend_weekly_buckets_by_iso_week(pool: PgPool) {
+    common::migrate(&pool).await;
+    // Both in the same ISO week (Mon 2026-07-13 … Sun 2026-07-19).
+    insert_item(&pool, "Segunda", -1000, "2026-07-13", "expense").await;
+    insert_item(&pool, "Sábado", -2000, "2026-07-18", "expense").await;
+    // Next week.
+    insert_item(&pool, "Semana seguinte", -4000, "2026-07-21", "expense").await;
+
+    let mut q = trend_q();
+    q.date_to = Some("2026-07-31".parse().unwrap());
+    q.granularity = Some("week".to_string());
+    let t = trend_data(&pool, &q).await.unwrap();
+
+    // Every bucket key is a Monday (YYYY-MM-DD); first bucket is the Monday
+    // on/before the window start, so partial edge weeks are included.
+    assert!(t.iter().all(|p| {
+        p.bucket.len() == 10 && {
+            let d = chrono::NaiveDate::parse_from_str(&p.bucket, "%Y-%m-%d").unwrap();
+            d.weekday() == chrono::Weekday::Mon
+        }
+    }));
+    let first = t.first().unwrap();
+    assert_eq!(first.bucket, "2025-07-28"); // Monday before window start (Aug/2025)
+    assert_eq!(first.spend_cents, 0);
+    let same_week = t.iter().find(|p| p.bucket == "2026-07-13").unwrap();
+    assert_eq!(same_week.spend_cents, 3000); // same-week items summed
+    let next = t.iter().find(|p| p.bucket == "2026-07-20").unwrap();
+    assert_eq!(next.spend_cents, 4000);
 }
 
 async fn daily_q() -> deepsave_backend::routes::dashboard::DailyQuery {

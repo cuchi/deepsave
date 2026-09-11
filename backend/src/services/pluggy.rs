@@ -29,7 +29,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::config::PluggyAccountConf;
-use crate::services::{recurring, tags};
+use crate::services::{categories, recurring, tags};
 
 const API_BASE: &str = "https://api.pluggy.ai";
 
@@ -472,7 +472,7 @@ pub async fn import_account_transactions(
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> Result<usize> {
-    let categories = load_categories(pool).await?;
+    let categories = categories::load_active(pool).await?;
     let txs = client.list_transactions(&acc.pluggy_account_id, date_from, date_to).await?;
 
     let mut new = 0usize;
@@ -565,17 +565,13 @@ fn map_transaction(
     // International (FX) charges carry the BRL value in `amountInAccountCurrency`
     // (e.g. US$ 15.00 → R$ 80.08); `amount` alone would be in the foreign currency.
     let raw_amount = tx.amount_in_account_currency.or(tx.amount)?;
-    let description = tx
+    // Bank-provided text only (no payment participants yet) — the card-refund
+    // keyword test below must run on the institution's own words.
+    let base_description = tx
         .description
         .clone()
         .or_else(|| tx.description_raw.clone())
-        .or_else(|| tx.merchant.as_ref().and_then(|m| m.name.clone()))
-        .or_else(|| {
-            tx.payment_data
-                .as_ref()
-                .and_then(|p| p.receiver.as_ref().and_then(|r| r.name.clone()))
-        })
-        .unwrap_or_else(|| "Transação".to_string());
+        .or_else(|| tx.merchant.as_ref().and_then(|m| m.name.clone()));
     let (amount, kind) = match tx.kind.as_deref() {
         Some("DEBIT") => {
             if is_card {
@@ -594,7 +590,7 @@ fn map_transaction(
                 // already visible on the bank side. Card **refunds/estornos**
                 // are also CREDIT + negative but carry refund keywords; import
                 // those as refunds (positive, money back).
-                if is_card_refund(&description) {
+                if is_card_refund(base_description.as_deref().unwrap_or_default()) {
                     (cents(raw_amount).abs(), "refund".to_string())
                 } else {
                     return None;
@@ -606,15 +602,30 @@ fn map_transaction(
         _ => return None,
     };
 
+    // Pluggy's `paymentData` names both ends of a transfer: `payer` (who sent)
+    // and `receiver` (who got it). Which one is the counterparty depends on the
+    // direction of the money — for money-in (PIX recebido, refunds/estornos) the
+    // interesting party is the **payer**; for money-out it's the receiver.
+    let counterparty = tx.payment_data.as_ref().and_then(|p| {
+        let (primary, secondary) = if kind == "income" || kind == "refund" {
+            (p.payer.as_ref(), p.receiver.as_ref())
+        } else {
+            (p.receiver.as_ref(), p.payer.as_ref())
+        };
+        primary
+            .and_then(|x| x.name.clone())
+            .or_else(|| secondary.and_then(|x| x.name.clone()))
+    });
+
+    let description = base_description
+        .or(counterparty.clone())
+        .unwrap_or_else(|| "Transação".to_string());
+
     let merchant = tx
         .merchant
         .as_ref()
         .and_then(|m| m.name.clone())
-        .or_else(|| {
-            tx.payment_data
-                .as_ref()
-                .and_then(|p| p.receiver.as_ref().and_then(|r| r.name.clone()))
-        });
+        .or(counterparty);
 
     let (installment, installment_count) = match &tx.credit_card_metadata {
         Some(cc) if cc.total_installments.unwrap_or(1) > 1 => (
@@ -678,12 +689,6 @@ fn parse_iso_datetime(s: &str) -> Option<NaiveDate> {
     let dt = DateTime::parse_from_rfc3339(s).ok()?;
     let br = chrono::FixedOffset::west_opt(3 * 3600)?;
     Some(dt.with_timezone(&br).date_naive())
-}
-
-async fn load_categories(pool: &PgPool) -> Result<Vec<(Uuid, String)>> {
-    Ok(sqlx::query_as("SELECT id, name FROM categories WHERE is_active")
-        .fetch_all(pool)
-        .await?)
 }
 
 // ---------- description tokens (shared by refund linking) ----------
@@ -911,19 +916,7 @@ fn best_charge(
 /// Best-effort match of a Pluggy category name to our seeded categories.
 fn match_category(categories: &[(Uuid, String)], pluggy_category: &str) -> Option<Uuid> {
     let target = alias_category(&tags::strip_accents(pluggy_category.trim()).to_lowercase());
-    if target.is_empty() {
-        return None;
-    }
-    categories
-        .iter()
-        .find(|(_, n)| tags::strip_accents(n).to_lowercase() == target)
-        .or_else(|| {
-            categories.iter().find(|(_, n)| {
-                let nl = tags::strip_accents(n).to_lowercase();
-                target.contains(&nl) || nl.contains(&target)
-            })
-        })
-        .map(|(id, _)| *id)
+    categories::find_by_name_loose(categories, &target)
 }
 
 /// Map Pluggy's category taxonomy to our canonical (accent-stripped) names.

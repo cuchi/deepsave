@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::AppError;
+use crate::routes::query::{parse_month, split_filters};
 
 #[derive(Debug, Deserialize)]
 pub struct DashboardQuery {
@@ -30,6 +31,8 @@ pub struct DashboardQuery {
 pub struct TrendQuery {
     pub months: Option<i32>,
     pub date_to: Option<NaiveDate>,
+    /// 'month' (default) | 'week' — bucket granularity for the trend line.
+    pub granularity: Option<String>,
     pub search: Option<String>,
     /// Comma-separated category ids (OR).
     pub category_ids: Option<String>,
@@ -66,7 +69,8 @@ pub struct Dashboard {
 
 #[derive(Debug, Serialize)]
 pub struct TrendPoint {
-    pub month: String,
+    /// Bucket key: "YYYY-MM" (monthly) or the ISO-week Monday "YYYY-MM-DD" (weekly).
+    pub bucket: String,
     pub spend_cents: i64,
     pub income_cents: i64,
 }
@@ -150,41 +154,9 @@ fn resolve_range(
     let Some(m) = month else {
         return Ok((None, None, "tudo".to_string()));
     };
-    let (y, mo) = m
-        .split_once('-')
-        .ok_or_else(|| AppError::bad_request("month must be YYYY-MM"))?;
-    let year: i32 = y
-        .parse()
-        .map_err(|_| AppError::bad_request("invalid month"))?;
-    let month_num: u32 = mo
-        .parse()
-        .map_err(|_| AppError::bad_request("invalid month"))?;
-    if !(1..=12).contains(&month_num) {
-        return Err(AppError::bad_request("invalid month"));
-    }
-
-    let start = NaiveDate::from_ymd_opt(year, month_num, 1)
-        .ok_or_else(|| AppError::bad_request("invalid month"))?;
-    let end = if month_num == 12 {
-        NaiveDate::from_ymd_opt(year + 1, 1, 1)
-    } else {
-        NaiveDate::from_ymd_opt(year, month_num + 1, 1)
-    }
-    .ok_or_else(|| AppError::bad_request("invalid month"))?
-        - chrono::Duration::days(1);
-    Ok((Some(start), Some(end), format!("{year:04}-{month_num:02}")))
-}
-
-/// Parse a comma-separated filter list (see `routes::items::split_filters`).
-pub(crate) fn split_filters(s: &Option<String>) -> Vec<String> {
-    s.as_deref()
-        .map(|v| {
-            v.split(',')
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
+    let (start, next) = parse_month(m)?;
+    let end = next - chrono::Duration::days(1);
+    Ok((Some(start), Some(end), start.format("%Y-%m").to_string()))
 }
 
 pub async fn dashboard(
@@ -457,10 +429,10 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
     .fetch_all(&state.pool)
     .await?;
 
-    // Upcoming obligations (next 30 days) + recurring monthly cost — only
-    // relevant for recent months (current month / first 15 days of next).
+    // Upcoming obligations (rest of the current month) + recurring monthly cost —
+    // only relevant for recent months (current month / first 15 days of next).
     let upcoming_total: i64 = if previsao_relevante {
-        let upcoming = upcoming_data(&state.pool, 30).await?;
+        let upcoming = upcoming_data(&state.pool, 1).await?;
         upcoming.iter().map(|u| u.amount_cents).sum()
     } else {
         0
@@ -602,7 +574,7 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
     payload_map.insert("novos_mercados".into(), json!(new_merchants));
     if previsao_relevante {
         payload_map.insert("recorrentes".into(), json!(recorrentes));
-        payload_map.insert("proximos_30_dias".into(), json!(upcoming_total));
+        payload_map.insert("proximos_mes".into(), json!(upcoming_total));
         payload_map.insert("recorrencia_mensal".into(), json!(recurring_monthly));
     }
     let payload = Value::Object(payload_map);
@@ -611,12 +583,12 @@ async fn generate_digest(state: &AppState, month: &str) -> Result<Value, AppErro
 {
   "resumo": "2-3 frases: total gasto, receitas, comparação com o mês anterior (variação %), deixe algum comentário sarcástico e sádico seu.",
   "destaques": ["2-4 itens: maiores categorias/mercados, coisas notáveis do mês"], use tom de ironia,
-  "avisos": ["alertas se relevantes: aumento de gasto, novos mercados com valores altos, compromissos futuros (próximos 30 dias), recorrentes mensais; lista vazia se nada relevante"]
+  "avisos": ["alertas se relevantes: aumento de gasto, novos mercados com valores altos, compromissos futuros (próximo mês), recorrentes mensais; lista vazia se nada relevante"]
 }
 Regras: valores em centavos (ex.: 123456 = R$ 1.234,56). Use formatação brasileira. Seja específico (nomes reais).
 NUNCA invente o tipo de negócio de um mercado/comerciante (ex.: não diga "o mercado X" ou "o restaurante Y" a menos que a categoria esteja informada no campo "cat" de "historico"). Cite apenas o nome e o valor. Se "cat" estiver presente, pode citá-la; senão, não adivinhe.
 "historico" é a lista de transações do mês (nome, cat, tags, tipo, parcela, amt em centavos) — use-a para identificar padrões e maiores gastos. "recorrentes" lista suas regras recorrentes (nome, amt, cat, tags, janela). "tag_desc" explica o significado das tags para o usuário (ex.: "sandero" = gastos com o carro) — respeite esses significados ao comentar. "digest_anterior" (se presente) é o resumo que você gerou no mês passado — use-o para dar continuidade: retome pontos que você levantou, confira se os avisos foram endereçados e compare o que você disse antes com o que aconteceu agora.
-TEMPO: você está analisando o mês de "mes", que terminou há "meses_atras" meses (0 = mês atual). Fale no tempo passado sobre esse mês, como se estivesse naquela época. Se "previsao_relevante" for false (mês já distante), os campos "recorrentes", "proximos_30_dias" e "recorrencia_mensal" NÃO existem e não são relevantes — não os cite nem especule sobre o futuro; foque apenas no mês analisado. Se for true (mês atual ou primeiros 15 dias do seguinte), pode usá-los."#;
+TEMPO: você está analisando o mês de "mes", que terminou há "meses_atras" meses (0 = mês atual). Fale no tempo passado sobre esse mês, como se estivesse naquela época. Se "previsao_relevante" for false (mês já distante), os campos "recorrentes", "proximos_mes" e "recorrencia_mensal" NÃO existem e não são relevantes — não os cite nem especule sobre o futuro; foque apenas no mês analisado. Se for true (mês atual ou primeiros 15 dias do seguinte), pode usá-los."#;
     let user = json!(payload.to_string());
     let value = state
         .ai
@@ -646,6 +618,7 @@ pub async fn trend(
 /// when the range is a single month.
 pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>, AppError> {
     let months = q.months.unwrap_or(12).clamp(1, 36);
+    let granularity = q.granularity.as_deref().unwrap_or("month");
     let category_ids = split_filters(&q.category_ids);
     let tags = split_filters(&q.tags);
 
@@ -657,8 +630,29 @@ pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>
     let start = end_month - Months::new((months - 1) as u32);
     let end = end_month + Months::new(1) - chrono::Duration::days(1); // inclusive last day
 
+    // Bucket key: "YYYY-MM" per month, or the ISO-week Monday ("YYYY-MM-DD")
+    // per week. Weekly buckets start on the Monday on/before `start`, so the
+    // partial edge weeks are included.
+    let (bucket_expr, buckets) = if granularity == "week" {
+        let mut keys = Vec::new();
+        let mut d = start - chrono::Duration::days(start.weekday().num_days_from_monday() as i64);
+        while d <= end {
+            keys.push(d.format("%Y-%m-%d").to_string());
+            d += chrono::Duration::days(7);
+        }
+        (
+            format!("to_char(date_trunc('week', {BUCKET_DATE})::date, 'YYYY-MM-DD')"),
+            keys,
+        )
+    } else {
+        let keys: Vec<String> = (0..months as u32)
+            .map(|k| (start + Months::new(k)).format("%Y-%m").to_string())
+            .collect();
+        (format!("to_char({BUCKET_DATE}, 'YYYY-MM')"), keys)
+    };
+
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT to_char({BUCKET_DATE}, 'YYYY-MM'),
+        "SELECT {bucket_expr},
                 COALESCE(SUM({NET_AMOUNT}), 0)::bigint,
                 COALESCE(SUM(CASE WHEN items.kind = 'income' THEN {AGG_AMOUNT_ADJ} ELSE 0 END), 0)::bigint
          FROM items
@@ -683,13 +677,11 @@ pub async fn trend_data(pool: &PgPool, q: &TrendQuery) -> Result<Vec<TrendPoint>
         map.insert(m, (s, i));
     }
 
-    let mut out = Vec::with_capacity(months as usize);
-    for k in 0..months {
-        let d = start + Months::new(k as u32);
-        let key = d.format("%Y-%m").to_string();
-        let (s, i) = map.get(&key).copied().unwrap_or((0, 0));
+    let mut out = Vec::with_capacity(buckets.len());
+    for key in &buckets {
+        let (s, i) = map.get(key).copied().unwrap_or((0, 0));
         out.push(TrendPoint {
-            month: key,
+            bucket: key.clone(),
             spend_cents: s,
             income_cents: i,
         });
@@ -980,7 +972,7 @@ pub async fn forecast_data(pool: &PgPool, months: i32) -> Result<Vec<ForecastPoi
 
 #[derive(Debug, Deserialize)]
 pub struct UpcomingQuery {
-    pub days: Option<i64>,
+    pub months: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -995,20 +987,27 @@ pub struct UpcomingItem {
     pub progress: Option<String>,
 }
 
-/// `GET /dashboard/upcoming?days=N` — flat, dated feed of the next obligations
-/// (future parcels + recurring occurrences), sorted by date.
+/// `GET /dashboard/upcoming?months=N` — flat, dated feed of the next obligations
+/// (future parcels + recurring occurrences) over N full months, sorted by date.
 pub async fn upcoming(
     State(state): State<AppState>,
     Query(q): Query<UpcomingQuery>,
 ) -> Result<Json<Vec<UpcomingItem>>, AppError> {
     Ok(Json(
-        upcoming_data(&state.pool, q.days.unwrap_or(90)).await?,
+        upcoming_data(&state.pool, q.months.unwrap_or(3)).await?,
     ))
 }
 
-pub async fn upcoming_data(pool: &PgPool, days: i64) -> Result<Vec<UpcomingItem>, AppError> {
+pub async fn upcoming_data(pool: &PgPool, months: i32) -> Result<Vec<UpcomingItem>, AppError> {
+    let months = months.clamp(1, 36);
     let today = chrono::Utc::now().date_naive();
-    let limit = today + chrono::Duration::days(days.clamp(1, 3650));
+    // Full-month horizon: from today through the end of the Nth month, counting
+    // the current month as month 1 — aligned to month boundaries, not days.
+    let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+    let limit = first
+        .checked_add_months(chrono::Months::new(months as u32))
+        .unwrap()
+        - chrono::Duration::days(1);
     let mut out = Vec::new();
 
     // Parcels, with description + category + progress from the latest billed parcel.

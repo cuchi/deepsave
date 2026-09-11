@@ -157,11 +157,7 @@ async fn claim_next(pool: &PgPool) -> Option<AiTagBatch> {
 
 /// Normalize an identity: strip accents, lowercase, drop non-alphanumerics.
 fn norm_key(x: &str) -> String {
-    crate::services::tags::strip_accents(x)
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect()
+    tags::fold_key(x)
 }
 
 /// Normalized names of all active categories — used to (a) remove category
@@ -229,19 +225,18 @@ async fn load_change_history(
     Ok(out)
 }
 
-/// Run the AI call for a batch and store per-item suggestions. Exposed (pub) so
-/// integration tests can drive it directly, like `bulk_update_items`.
-pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Result<()> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+/// Suggestion item ids for a batch, in selection order.
+async fn fetch_ids(pool: &PgPool, batch_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
         "SELECT item_id FROM ai_tag_suggestions WHERE batch_id = $1 ORDER BY created_at",
     )
     .bind(batch_id)
     .fetch_all(pool)
-    .await?;
-    if ids.is_empty() {
-        return Ok(());
-    }
+    .await
+}
 
+/// Load the item fields the AI payload needs, keyed by item id.
+async fn fetch_rows(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, BatchItemRow>, sqlx::Error> {
     let rows: Vec<BatchItemRow> = sqlx::query_as(
         "SELECT i.id, i.merchant, i.description, i.amount_cents, i.occurred_on, c.name, i.tags,
                 i.pluggy_category, i.mcc::bigint, i.operation_type, i.payment_method
@@ -249,32 +244,52 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
          LEFT JOIN categories c ON c.id = i.category_id
          WHERE i.id = ANY($1)",
     )
-    .bind(&ids)
+    .bind(ids)
     .fetch_all(pool)
     .await?;
-    let by_id: HashMap<Uuid, _> = rows.into_iter().map(|r| (r.0, r)).collect();
+    Ok(rows.into_iter().map(|r| (r.0, r)).collect())
+}
 
-    let all_tags: Vec<String> = sqlx::query_scalar(
+/// Active categories as `(name, parent name)` — the vocabulary the AI chooses from.
+async fn active_categories(pool: &PgPool) -> Result<Vec<(String, Option<String>)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT c.name, p.name FROM categories c
+         LEFT JOIN categories p ON p.id = c.parent_id
+         WHERE c.is_active ORDER BY c.name",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// The user's tag vocabulary minus category names (a tag that repeats a category
+/// is never suggested — the category covers it).
+async fn tag_vocabulary(
+    pool: &PgPool,
+    cat_norms: &HashSet<String>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let all: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT tag FROM items CROSS JOIN LATERAL unnest(tags) AS tag ORDER BY tag",
     )
     .fetch_all(pool)
     .await?;
-    // Tags that are also categories are never suggested (the category covers it).
-    let cat_norms = category_norms(pool).await?;
-    let all_tags: Vec<String> = all_tags
+    Ok(all
         .into_iter()
         .filter(|t| !cat_norms.contains(&norm_key(t)))
-        .collect();
+        .collect())
+}
 
+/// Per merchant: the last `EXAMPLES_PER_MERCHANT` confirmed items that carry
+/// tags — real ground truth for the AI to mirror.
+async fn merchant_examples(
+    pool: &PgPool,
+    ids: &[Uuid],
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
     let merchants: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT merchant FROM items WHERE id = ANY($1) AND merchant IS NOT NULL",
     )
-    .bind(&ids)
+    .bind(ids)
     .fetch_all(pool)
     .await?;
-
-    // Per merchant: the last `EXAMPLES_PER_MERCHANT` confirmed items that carry
-    // tags — real ground truth for the AI to mirror.
     let mut examples: Vec<serde_json::Value> = Vec::new();
     for merchant in &merchants {
         let ex: Vec<ExampleRow> = sqlx::query_as(
@@ -299,15 +314,17 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
             examples.push(json!({ "merch": merchant, "n": list }));
         }
     }
+    Ok(examples)
+}
 
-    // Compact item list, in batch (selection) order. `i` is the 0-based index the
-    // AI must echo back (avoids hallucinating uuids).
+/// Compact item list, in batch (selection) order. `i` is the 0-based index the
+/// AI must echo back (avoids hallucinating uuids).
+fn build_items(ids: &[Uuid], by_id: &HashMap<Uuid, BatchItemRow>) -> Vec<serde_json::Value> {
     let mut items = Vec::with_capacity(ids.len());
-    let mut keys: Vec<String> = Vec::new();
     for (i, id) in ids.iter().enumerate() {
-        if let Some((_, merchant, description, amount, date, cat, tags, pc, mcc, ot, pm)) = by_id.get(id) {
-            let key = crate::services::change_log::merchant_key(merchant.as_deref(), description);
-            keys.push(key);
+        if let Some((_, merchant, description, amount, date, cat, tags, pc, mcc, ot, pm)) =
+            by_id.get(id)
+        {
             items.push(json!({
                 "i": i,
                 "desc": description,
@@ -320,8 +337,22 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
             }));
         }
     }
+    items
+}
+
+/// Attach each item's recent change-log history (`hist`), keyed by its identity.
+async fn attach_history(pool: &PgPool, items: &mut [serde_json::Value]) -> Result<()> {
+    let keys: Vec<String> = items
+        .iter()
+        .map(|it| {
+            crate::services::change_log::merchant_key(
+                it["merch"].as_str(),
+                it["desc"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
     let history = load_change_history(pool, &keys).await?;
-    for it in &mut items {
+    for it in items.iter_mut() {
         let key = crate::services::change_log::merchant_key(
             it["merch"].as_str(),
             it["desc"].as_str().unwrap_or(""),
@@ -330,50 +361,84 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
             it["hist"] = json!(h);
         }
     }
+    Ok(())
+}
 
-    let tag_desc = tags::tag_descriptions(pool, &all_tags).await?;
-    let diario = crate::services::diary::recent_diary(pool, 10).await?;
-    let user = json!({ "all_tags": all_tags, "tag_desc": tag_desc, "diario": diario, "items": items, "ex": examples });
-    let system = build_tag_system_prompt();
-    let value = ai
-        .chat_json(&system, json!(user.to_string()), ai.text_model(), None, "tag_batch")
-        .await
-        .context("AI tagging call failed")?;
-
+/// Unique, in-range `(index, entry)` pairs under `value[key]`, in array order.
+fn unique_entries<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+    len: usize,
+) -> Vec<(usize, &'a serde_json::Value)> {
     let mut seen = HashSet::new();
-    let mut tx = pool.begin().await?;
-    if let Some(arr) = value.get("suggestions").and_then(|v| v.as_array()) {
+    let mut out = Vec::new();
+    if let Some(arr) = value.get(key).and_then(|v| v.as_array()) {
         for entry in arr {
             let Some(index) = entry.get("index").and_then(|x| x.as_u64()) else {
                 continue;
             };
             let index = index as usize;
-            if index >= ids.len() || !seen.insert(index) {
+            if index >= len || !seen.insert(index) {
                 continue;
             }
-            let raw_tags: Vec<String> = entry
-                .get("tags")
-                .and_then(|t| t.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|t| t.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let tags: Vec<String> = tags::normalize(&raw_tags)
-                .into_iter()
-                .filter(|t| !cat_norms.contains(&norm_key(t)))
-                .collect();
-            sqlx::query(
-                "UPDATE ai_tag_suggestions SET suggested_tags = $1
-                 WHERE batch_id = $2 AND item_id = $3",
-            )
-            .bind(&tags)
-            .bind(batch_id)
-            .bind(ids[index])
-            .execute(&mut *tx)
-            .await?;
+            out.push((index, entry));
         }
+    }
+    out
+}
+
+/// Normalized tags from a suggestion entry, dropping category-name collisions.
+fn extract_tags(entry: &serde_json::Value, cat_norms: &HashSet<String>) -> Vec<String> {
+    let raw: Vec<String> = entry
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    tags::normalize(&raw)
+        .into_iter()
+        .filter(|t| !cat_norms.contains(&norm_key(t)))
+        .collect()
+}
+
+/// Run the AI call for a batch and store per-item suggestions. Exposed (pub) so
+/// integration tests can drive it directly, like `bulk_update_items`.
+pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Result<()> {
+    let ids = fetch_ids(pool, batch_id).await?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let by_id = fetch_rows(pool, &ids).await?;
+    let cat_norms = category_norms(pool).await?;
+    let all_tags = tag_vocabulary(pool, &cat_norms).await?;
+    let examples = merchant_examples(pool, &ids).await?;
+
+    let mut items = build_items(&ids, &by_id);
+    attach_history(pool, &mut items).await?;
+
+    let tag_desc = tags::tag_descriptions(pool, &all_tags).await?;
+    let diario = crate::services::diary::recent_diary(pool, 10).await?;
+    let user = json!({ "all_tags": all_tags, "tag_desc": tag_desc, "diario": diario, "items": items, "ex": examples });
+    let value = ai
+        .chat_json(&build_tag_system_prompt(), json!(user.to_string()), ai.text_model(), None, "tag_batch")
+        .await
+        .context("AI tagging call failed")?;
+
+    let mut tx = pool.begin().await?;
+    for (index, entry) in unique_entries(&value, "suggestions", ids.len()) {
+        let tags = extract_tags(entry, &cat_norms);
+        sqlx::query(
+            "UPDATE ai_tag_suggestions SET suggested_tags = $1
+             WHERE batch_id = $2 AND item_id = $3",
+        )
+        .bind(&tags)
+        .bind(batch_id)
+        .bind(ids[index])
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(())
@@ -384,113 +449,18 @@ pub async fn process_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Resu
 /// vocabulary and any suggested tag that collides with a category is dropped —
 /// tags are situational, categories cover the "what".
 async fn process_full_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Result<()> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT item_id FROM ai_tag_suggestions WHERE batch_id = $1 ORDER BY created_at",
-    )
-    .bind(batch_id)
-    .fetch_all(pool)
-    .await?;
+    let ids = fetch_ids(pool, batch_id).await?;
     if ids.is_empty() {
         return Ok(());
     }
-
-    let rows: Vec<BatchItemRow> = sqlx::query_as(
-        "SELECT i.id, i.merchant, i.description, i.amount_cents, i.occurred_on, c.name, i.tags,
-                i.pluggy_category, i.mcc::bigint, i.operation_type, i.payment_method
-         FROM items i
-         LEFT JOIN categories c ON c.id = i.category_id
-         WHERE i.id = ANY($1)",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
-    let by_id: HashMap<Uuid, _> = rows.into_iter().map(|r| (r.0, r)).collect();
-
-    // Active categories (name + parent) for the AI to choose from, and their
-    // normalized names for the tag→category collision filter.
-    let categories: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT c.name, p.name FROM categories c
-         LEFT JOIN categories p ON p.id = c.parent_id
-         WHERE c.is_active ORDER BY c.name",
-    )
-    .fetch_all(pool)
-    .await?;
+    let by_id = fetch_rows(pool, &ids).await?;
+    let categories = active_categories(pool).await?;
     let cat_norms = category_norms(pool).await?;
+    let all_tags = tag_vocabulary(pool, &cat_norms).await?;
+    let examples = merchant_examples(pool, &ids).await?;
 
-    // Tag vocabulary: the user's existing tags MINUS category names.
-    let all_tags: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT tag FROM items CROSS JOIN LATERAL unnest(tags) AS tag ORDER BY tag",
-    )
-    .fetch_all(pool)
-    .await?;
-    let all_tags: Vec<String> = all_tags
-        .into_iter()
-        .filter(|t| !cat_norms.contains(&norm_key(t)))
-        .collect();
-
-    let merchants: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT merchant FROM items WHERE id = ANY($1) AND merchant IS NOT NULL",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
-
-    // Per merchant: the last `EXAMPLES_PER_MERCHANT` confirmed items that carry
-    // tags — real ground truth for the AI to mirror.
-    let mut examples: Vec<serde_json::Value> = Vec::new();
-    for merchant in &merchants {
-        let ex: Vec<ExampleRow> = sqlx::query_as(
-            "SELECT i.description, i.amount_cents, i.occurred_on, c.name, i.tags
-             FROM items i
-             LEFT JOIN categories c ON c.id = i.category_id
-             WHERE i.merchant = $1 AND cardinality(i.tags) > 0 AND i.status = 'confirmed'
-             ORDER BY i.occurred_on DESC, i.created_at DESC
-             LIMIT $2",
-        )
-        .bind(merchant)
-        .bind(EXAMPLES_PER_MERCHANT)
-        .fetch_all(pool)
-        .await?;
-        if !ex.is_empty() {
-            let list: Vec<serde_json::Value> = ex
-                .into_iter()
-                .map(|(desc, amt, date, cat, tags)| {
-                    json!({ "desc": desc, "amt": amt, "date": date, "cat": cat, "tags": tags })
-                })
-                .collect();
-            examples.push(json!({ "merch": merchant, "n": list }));
-        }
-    }
-
-    // Compact item list, in batch (selection) order.
-    let mut items = Vec::with_capacity(ids.len());
-    let mut keys: Vec<String> = Vec::new();
-    for (i, id) in ids.iter().enumerate() {
-        if let Some((_, merchant, description, amount, date, cat, tags, pc, mcc, ot, pm)) = by_id.get(id) {
-            let key = crate::services::change_log::merchant_key(merchant.as_deref(), description);
-            keys.push(key);
-            items.push(json!({
-                "i": i,
-                "desc": description,
-                "merch": merchant,
-                "amt": amount,
-                "date": date.format("%Y-%m-%d").to_string(),
-                "cat": cat,
-                "tags": tags,
-                "pc": pc, "mcc": mcc, "op": ot, "pay": pm,
-            }));
-        }
-    }
-    let history = load_change_history(pool, &keys).await?;
-    for it in &mut items {
-        let key = crate::services::change_log::merchant_key(
-            it["merch"].as_str(),
-            it["desc"].as_str().unwrap_or(""),
-        );
-        if let Some(h) = history.get(&key) {
-            it["hist"] = json!(h);
-        }
-    }
+    let mut items = build_items(&ids, &by_id);
+    attach_history(pool, &mut items).await?;
 
     let tag_desc = tags::tag_descriptions(pool, &all_tags).await?;
     let diario = crate::services::diary::recent_diary(pool, 10).await?;
@@ -502,17 +472,14 @@ async fn process_full_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Res
         "items": items,
         "ex": examples,
     });
-    let system = build_full_system_prompt();
     let value = ai
-        .chat_json(&system, json!(user.to_string()), ai.text_model(), None, "tag_batch")
+        .chat_json(&build_full_system_prompt(), json!(user.to_string()), ai.text_model(), None, "tag_batch")
         .await
         .context("AI tagging call failed")?;
 
-    let mut seen = HashSet::new();
-    let mut tx = pool.begin().await?;
     // Fallback: the model sometimes returns categories in a separate top-level
     // "categories" array (index → category) instead of inside "suggestions".
-    let cats_by_index: std::collections::HashMap<usize, String> = value
+    let cats_by_index: HashMap<usize, String> = value
         .get("categories")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -530,50 +497,29 @@ async fn process_full_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Res
                 .collect()
         })
         .unwrap_or_default();
-    if let Some(arr) = value.get("suggestions").and_then(|v| v.as_array()) {
-        for entry in arr {
-            let Some(index) = entry.get("index").and_then(|x| x.as_u64()) else {
-                continue;
-            };
-            let index = index as usize;
-            if index >= ids.len() || !seen.insert(index) {
-                continue;
-            }
-            let raw_tags: Vec<String> = entry
-                .get("tags")
-                .and_then(|t| t.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|t| t.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Deterministic collision filter: a tag that is also a category name
-            // is dropped (the category suggestion covers it).
-            let tags: Vec<String> = tags::normalize(&raw_tags)
-                .into_iter()
-                .filter(|t| !cat_norms.contains(&norm_key(t)))
-                .collect();
-            let mut category = entry
-                .get("category")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if category.is_empty() {
-                category = cats_by_index.get(&index).cloned().unwrap_or_default();
-            }
-            sqlx::query(
-                "UPDATE ai_tag_suggestions SET suggested_tags = $1, suggested_category = $2
-                 WHERE batch_id = $3 AND item_id = $4",
-            )
-            .bind(&tags)
-            .bind(&category)
-            .bind(batch_id)
-            .bind(ids[index])
-            .execute(&mut *tx)
-            .await?;
+
+    let mut tx = pool.begin().await?;
+    for (index, entry) in unique_entries(&value, "suggestions", ids.len()) {
+        let tags = extract_tags(entry, &cat_norms);
+        let mut category = entry
+            .get("category")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if category.is_empty() {
+            category = cats_by_index.get(&index).cloned().unwrap_or_default();
         }
+        sqlx::query(
+            "UPDATE ai_tag_suggestions SET suggested_tags = $1, suggested_category = $2
+             WHERE batch_id = $3 AND item_id = $4",
+        )
+        .bind(&tags)
+        .bind(&category)
+        .bind(batch_id)
+        .bind(ids[index])
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(())
@@ -650,49 +596,14 @@ Regras:
 /// proposals in `suggested_category` (an existing category name, "nova: <nome>",
 /// or '' when the AI can't classify — transfers etc.).
 pub async fn process_categorize_batch(pool: &PgPool, ai: &AiClient, batch_id: Uuid) -> Result<()> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT item_id FROM ai_tag_suggestions WHERE batch_id = $1 ORDER BY created_at",
-    )
-    .bind(batch_id)
-    .fetch_all(pool)
-    .await?;
+    let ids = fetch_ids(pool, batch_id).await?;
     if ids.is_empty() {
         return Ok(());
     }
+    let by_id = fetch_rows(pool, &ids).await?;
+    let categories = active_categories(pool).await?;
 
-    let rows: Vec<BatchItemRow> = sqlx::query_as(
-        "SELECT i.id, i.merchant, i.description, i.amount_cents, i.occurred_on, c.name, i.tags,
-                i.pluggy_category, i.mcc::bigint, i.operation_type, i.payment_method
-         FROM items i
-         LEFT JOIN categories c ON c.id = i.category_id
-         WHERE i.id = ANY($1)",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
-    let by_id: HashMap<Uuid, _> = rows.into_iter().map(|r| (r.0, r)).collect();
-
-    // Active categories (name + parent) for the AI to choose from.
-    let categories: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT c.name, p.name FROM categories c
-         LEFT JOIN categories p ON p.id = c.parent_id
-         WHERE c.is_active ORDER BY c.name",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    // Normalize an identity: strip accents, lowercase, drop non-alphanumerics.
-    let norm_key = |x: &str| -> String {
-        tags::strip_accents(x)
-            .to_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect()
-    };
-
-    // The user's own tagged examples (description, merchant, amount, date,
-    // category, tags) — ground truth for the AI to mirror. Indexed by
-    // merchant-or-description identity.
+    // The user's own tagged examples, grouped by merchant-or-description identity.
     let ex_rows: Vec<(String, Option<String>, i64, NaiveDate, Option<String>, Vec<String>)> =
         sqlx::query_as(
             "SELECT i.description, i.merchant, i.amount_cents, i.occurred_on, c.name, i.tags
@@ -704,10 +615,7 @@ pub async fn process_categorize_batch(pool: &PgPool, ai: &AiClient, batch_id: Uu
         .await?;
     let mut ex_groups: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
     for (desc, merchant, amt, date, cat, tags) in ex_rows {
-        let key = merchant
-            .as_deref()
-            .map(|m| norm_key(m))
-            .unwrap_or_else(|| norm_key(&desc));
+        let key = crate::services::change_log::merchant_key(merchant.as_deref(), &desc);
         let v = json!({ "desc": desc, "amt": amt, "date": date, "cat": cat, "tags": tags });
         match ex_groups.iter_mut().find(|(k, _)| *k == key) {
             Some(g) => {
@@ -733,45 +641,21 @@ pub async fn process_categorize_batch(pool: &PgPool, ai: &AiClient, batch_id: Uu
     .await?;
     let tag_desc = tags::tag_descriptions(pool, &all_tags).await?;
 
-    let mut items = Vec::with_capacity(ids.len());
-    let mut keys: Vec<String> = Vec::new();
-    for (i, id) in ids.iter().enumerate() {
-        let Some((_, merchant, description, amount, date, cat, tags, pc, mcc, ot, pm)) = by_id.get(id) else {
-            continue;
-        };
-        let identity = merchant
-            .as_deref()
-            .map(|m| norm_key(m))
-            .unwrap_or_else(|| norm_key(description));
+    let mut items = build_items(&ids, &by_id);
+    for it in items.iter_mut() {
+        let identity = crate::services::change_log::merchant_key(
+            it["merch"].as_str(),
+            it["desc"].as_str().unwrap_or(""),
+        );
         let ex: Vec<serde_json::Value> = ex_groups
             .iter()
             .filter(|(k, _)| identity_matches(&identity, k))
             .flat_map(|(_, v)| v.iter().cloned())
             .take(4)
             .collect();
-        keys.push(identity);
-        items.push(json!({
-            "i": i,
-            "desc": description,
-            "merch": merchant,
-            "amt": amount,
-            "date": date.format("%Y-%m-%d").to_string(),
-            "cat": cat,
-            "tags": tags,
-            "pc": pc, "mcc": mcc, "op": ot, "pay": pm,
-            "ex": ex,
-        }));
+        it["ex"] = json!(ex);
     }
-    let history = load_change_history(pool, &keys).await?;
-    for it in &mut items {
-        let key = crate::services::change_log::merchant_key(
-            it["merch"].as_str(),
-            it["desc"].as_str().unwrap_or(""),
-        );
-        if let Some(h) = history.get(&key) {
-            it["hist"] = json!(h);
-        }
-    }
+    attach_history(pool, &mut items).await?;
 
     let diario = crate::services::diary::recent_diary(pool, 10).await?;
     let user = json!({
@@ -780,42 +664,31 @@ pub async fn process_categorize_batch(pool: &PgPool, ai: &AiClient, batch_id: Uu
         "diario": diario,
         "items": items,
     });
-    let system = build_categorize_system_prompt();
     let value = ai
-        .chat_json(&system, json!(user.to_string()), ai.text_model(), None, "categorize")
+        .chat_json(&build_categorize_system_prompt(), json!(user.to_string()), ai.text_model(), None, "categorize")
         .await
         .context("AI categorization call failed")?;
 
-    let mut seen = HashSet::new();
     let mut tx = pool.begin().await?;
-    if let Some(arr) = value.get("categories").and_then(|v| v.as_array()) {
-        for entry in arr {
-            let Some(index) = entry.get("index").and_then(|x| x.as_u64()) else {
-                continue;
-            };
-            let index = index as usize;
-            if index >= ids.len() || !seen.insert(index) {
-                continue;
-            }
-            let category = entry
-                .get("category")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if category.is_empty() {
-                continue;
-            }
-            sqlx::query(
-                "UPDATE ai_tag_suggestions SET suggested_category = $1
-                 WHERE batch_id = $2 AND item_id = $3",
-            )
-            .bind(&category)
-            .bind(batch_id)
-            .bind(ids[index])
-            .execute(&mut *tx)
-            .await?;
+    for (index, entry) in unique_entries(&value, "categories", ids.len()) {
+        let category = entry
+            .get("category")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if category.is_empty() {
+            continue;
         }
+        sqlx::query(
+            "UPDATE ai_tag_suggestions SET suggested_category = $1
+             WHERE batch_id = $2 AND item_id = $3",
+        )
+        .bind(&category)
+        .bind(batch_id)
+        .bind(ids[index])
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(())
@@ -992,16 +865,9 @@ async fn resolve_category_id(pool: &PgPool, proposal: &str) -> Result<Option<Uui
     let base = normalized.split('(').next().map(str::trim).unwrap_or(&normalized);
 
     // Match in Rust (Postgres has no strip_accents).
-    let cats: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, name FROM categories WHERE is_active")
-            .fetch_all(pool)
-            .await?;
-    let find = |target: &str| {
-        cats.iter()
-            .find(|(_, n)| tags::strip_accents(n).to_lowercase() == target)
-            .map(|(id, _)| *id)
-    };
-    let category_id = find(&normalized).or_else(|| find(base));
+    let cats = crate::services::categories::load_active(pool).await?;
+    let category_id = crate::services::categories::find_by_name(&cats, &normalized)
+        .or_else(|| crate::services::categories::find_by_name(&cats, base));
     Ok(match category_id {
         Some(id) => Some(id),
         None => {

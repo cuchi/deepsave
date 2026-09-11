@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod diary;
 pub mod items;
 pub mod pluggy;
+pub mod query;
 pub mod recurring;
 pub mod system;
 pub mod tags;

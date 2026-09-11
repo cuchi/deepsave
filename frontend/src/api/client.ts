@@ -141,7 +141,8 @@ export interface DashboardData {
 }
 
 export interface TrendPoint {
-  month: string
+  /** Bucket key: "YYYY-MM" (monthly) or ISO-week Monday "YYYY-MM-DD" (weekly). */
+  bucket: string
   spend_cents: number
   income_cents: number
 }
@@ -196,9 +197,10 @@ export const dashboardApi = {
   async get(params: DashboardParams = {}): Promise<DashboardData> {
     return (await api.get<DashboardData>('/dashboard', { params })).data
   },
-  async trend(months = 12, params: DashboardParams = {}): Promise<TrendPoint[]> {
+  /** Spend/income history over a rolling window, bucketed monthly or weekly. */
+  async trend(months = 12, params: DashboardParams = {}, granularity: 'month' | 'week' = 'month'): Promise<TrendPoint[]> {
     return (await api.get<TrendPoint[]>('/dashboard/trend', {
-      params: { months, ...params },
+      params: { months, granularity, ...params },
     })).data
   },
   /** Daily expense totals: `stack_by='category'` (stacked bar) or `'none'` (calendar). */
@@ -213,9 +215,9 @@ export const dashboardApi = {
   async forecast(months = 3): Promise<ForecastPoint[]> {
     return (await api.get<ForecastPoint[]>('/dashboard/forecast', { params: { months } })).data
   },
-  /** Flat, dated feed of the next obligations within `days`. */
-  async upcoming(days = 90): Promise<UpcomingItem[]> {
-    return (await api.get<UpcomingItem[]>('/dashboard/upcoming', { params: { days } })).data
+  /** Flat, dated feed of the next obligations over `months` full months. */
+  async upcoming(months = 3): Promise<UpcomingItem[]> {
+    return (await api.get<UpcomingItem[]>('/dashboard/upcoming', { params: { months } })).data
   },
   /** Saved AI narrative for a month (YYYY-MM) — read-only, no AI call. */
   async digestGet(month: string): Promise<DigestResult> {

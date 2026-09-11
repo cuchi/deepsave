@@ -242,3 +242,61 @@ async fn mcc_rule_categorizes_uncategorized_card_items(pool: sqlx::PgPool) {
     // Idempotent.
     assert_eq!(mcc::apply_mcc_categories(&pool).await.unwrap(), 0);
 }
+
+#[sqlx::test]
+async fn pix_uses_direction_aware_counterparty(pool: sqlx::PgPool) {
+    common::migrate(&pool).await;
+    let mock = MockServer::start().await;
+    let client = seed_client(&mock).await;
+
+    let confs = vec![conf("acc-checking", "nubank", "BANK", "Nubank — Conta")];
+    seed_configured_accounts(&pool, &confs).await.unwrap();
+
+    // Received Pix: generic bank description, sender lives in paymentData.payer.
+    // Sent Pix: recipient lives in paymentData.receiver.
+    Mock::given(method("GET"))
+        .and(path("/v2/transactions"))
+        .and(query_param("accountId", "acc-checking"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "id": "tx-pix-in", "description": "PIX RECEBIDO", "amount": 250.0,
+                  "type": "CREDIT", "date": "2026-09-05T12:00:00.000Z", "status": "POSTED",
+                  "paymentData": { "paymentMethod": "PIX",
+                    "payer": { "name": "Jonas Peters" },
+                    "receiver": { "name": "Paulo Cuchi" } } },
+                { "id": "tx-pix-out", "description": "PIX ENVIADO", "amount": -100.0,
+                  "type": "DEBIT", "date": "2026-09-05T13:00:00.000Z", "status": "POSTED",
+                  "paymentData": { "paymentMethod": "PIX",
+                    "payer": { "name": "Paulo Cuchi" },
+                    "receiver": { "name": "Lidia Gregorek" } } }
+            ],
+            "next": null
+        })))
+        .mount(&mock)
+        .await;
+
+    sync_all_accounts(&pool, &client, None, None).await.unwrap();
+
+    // Income: merchant = payer (the sender). Expense: merchant = receiver.
+    let rows: Vec<(String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT description, kind, merchant, amount_cents FROM items ORDER BY kind",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    let (_, kind_in, merchant_in, cents_in) = rows
+        .iter()
+        .find(|r| r.0 == "PIX RECEBIDO")
+        .expect("received pix imported");
+    assert_eq!(kind_in, "income");
+    assert_eq!(merchant_in.as_deref(), Some("Jonas Peters"));
+    assert_eq!(*cents_in, 25_000);
+    let (_, kind_out, merchant_out, _) = rows
+        .iter()
+        .find(|r| r.0 == "PIX ENVIADO")
+        .expect("sent pix imported");
+    assert_eq!(kind_out, "expense");
+    assert_eq!(merchant_out.as_deref(), Some("Lidia Gregorek"));
+}
+

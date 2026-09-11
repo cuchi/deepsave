@@ -134,9 +134,7 @@ pub fn category_for_mcc(mcc: i32) -> Option<&'static str> {
 /// category; unknown categories are skipped). Idempotent — only touches
 /// uncategorized items. Returns how many were categorized.
 pub async fn apply_mcc_categories(pool: &PgPool) -> Result<usize> {
-    let cats: Vec<(uuid::Uuid, String)> = sqlx::query_as("SELECT id, name FROM categories WHERE is_active")
-        .fetch_all(pool)
-        .await?;
+    let cats: Vec<(uuid::Uuid, String)> = crate::services::categories::load_active(pool).await?;
 
     let rows: Vec<(uuid::Uuid, i32)> = sqlx::query_as(
         "SELECT id, mcc FROM items WHERE mcc IS NOT NULL AND category_id IS NULL AND kind = 'expense'",
@@ -149,17 +147,14 @@ pub async fn apply_mcc_categories(pool: &PgPool) -> Result<usize> {
         let Some(name) = category_for_mcc(mcc) else {
             continue;
         };
-        let Some(cat_id) = cats.iter().find(|(_, n)| {
-            crate::services::tags::strip_accents(n).to_lowercase()
-                == crate::services::tags::strip_accents(name).to_lowercase()
-        }) else {
+        let Some(cat_id) = crate::services::categories::find_by_name(&cats, name) else {
             // Category name from the mapping not found (e.g. deleted) — skip.
             continue;
         };
         let res = sqlx::query(
             "UPDATE items SET category_id = $1, updated_at = now() WHERE id = $2 AND category_id IS NULL",
         )
-        .bind(cat_id.0)
+        .bind(cat_id)
         .bind(id)
         .execute(pool)
         .await?;

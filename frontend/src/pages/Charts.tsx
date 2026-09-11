@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -15,7 +15,7 @@ import {
 } from '../api/client'
 import { currentMonth, currentMonthRange, fmtCents } from '../lib/format'
 import ItemFilters, { useFiltersUrl, type ItemFiltersValue } from '../components/ItemFilters'
-import EChart, { type EChartsCoreOption } from '../components/EChart'
+import EChart, { type EChartsCoreOption, type EChartsInstance } from '../components/EChart'
 
 const fmtUpdatedAt = (iso?: string) => {
   if (!iso) return '—'
@@ -57,10 +57,20 @@ function dashboardParams(f: ItemFiltersValue) {
   }
 }
 
+/** `dashboardParams` without the date window — for charts that always show a fixed window. */
+function dashboardParamsNoDates(f: ItemFiltersValue) {
+  const { date_from: _df, date_to: _dt, ...rest } = dashboardParams(f)
+  return rest
+}
+
 // ---------- Previsão (merged from the old Forecast page) ----------
 
-const HORIZONS = [30, 60, 90, 180] as const
-const DEFAULT_HORIZON = 90
+const HORIZONS = [1, 3, 6, 12] as const
+const DEFAULT_HORIZON = 3
+
+function monthsLabel(n: number): string {
+  return n === 1 ? '1 mês' : `${n} meses`
+}
 
 function dayShort(ymd: string): string {
   return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`
@@ -138,25 +148,32 @@ function forecastOption(points: { month: string; installments_cents: number; rec
 
 // ---------- ECharts option builders ----------
 
-function trendOption(data: TrendPoint[]): EChartsCoreOption {
+function trendOption(data: TrendPoint[], granularity: 'month' | 'week' = 'month'): EChartsCoreOption {
+  const weekly = granularity === 'week'
+  const bucketLabel = (b: string) =>
+    weekly ? `${b.slice(8, 10)}/${b.slice(5, 7)}` : `${b.slice(5, 7)}/${b.slice(0, 4)}`
+  const bucketTitle = (b: string) => (weekly ? `Semana de ${fmtFullDate(b)}` : monthTitle(b))
   return {
     textStyle: AXIS_TEXT,
     tooltip: {
       trigger: 'axis',
       ...TOOLTIP_BASE,
       formatter: (ps: unknown) => {
-        const v = firstAxisValue(ps)
-        return axisTooltip(ps, v)
+        const arr = (Array.isArray(ps) ? ps : [ps]) as { dataIndex?: number }[]
+        const idx = arr[0]?.dataIndex
+        const b = idx != null ? data[idx]?.bucket : undefined
+        return axisTooltip(ps, b ? bucketTitle(b) : undefined)
       },
     },
     legend: { top: 0, textStyle: AXIS_TEXT },
     grid: { left: 8, right: 12, top: 34, bottom: 0, containLabel: true },
     xAxis: {
       type: 'category',
-      data: data.map((d) => `${d.month.slice(5, 7)}/${d.month.slice(0, 4)}`),
+      data: data.map((d) => bucketLabel(d.bucket)),
       axisLine: { lineStyle: { color: '#3f3f46' } },
       axisTick: { show: false },
-      axisLabel: AXIS_LABEL,
+      // Weekly series has ~52 labels — show every 4th (roughly monthly) to stay readable.
+      axisLabel: weekly ? { ...AXIS_LABEL, interval: 3 } : AXIS_LABEL,
     },
     yAxis: {
       type: 'value',
@@ -355,6 +372,11 @@ function dailyOption(points: DailyPoint[], rangeDays: string[] = []): EChartsCor
       containLabel: true,
     },
     dataZoom,
+    // LineX brush (drag on the chart to select a date segment): activated via
+    // the "Selecionar período" toggle (takeGlobalCursor) and applied on brushEnd.
+    brush: {
+      xAxisIndex: 0,
+    },
     xAxis: {
       type: 'category',
       data: dates,
@@ -561,37 +583,128 @@ export default function Charts() {
   const { data: banks = [] } = useQuery({ queryKey: ['banks'], queryFn: banksApi.list })
 
   const params = useMemo(() => dashboardParams(filters), [filters])
+  // Histórico and Calendário always show a fixed 12-month window, so they ignore
+  // the date range (non-date filters still apply).
+  const paramsNoDates = useMemo(() => dashboardParamsNoDates(filters), [filters])
   // Full day list for the stacked bar (zero days included when a range is set).
   const rangeDays = useMemo(
     () => (filters.dateFrom && filters.dateTo ? daysInRange(filters.dateFrom, filters.dateTo) : []),
     [filters.dateFrom, filters.dateTo],
   )
 
+  // Brush-to-filter on the daily stacked bar: toggling activates a lineX brush;
+  // dragging a segment sets date_from/date_to from the brushed x-range.
+  const [brushActive, setBrushActive] = useState(false)
+  const chartRef = useRef<EChartsInstance | null>(null)
+
+
   const { data: dash } = useQuery({
     queryKey: ['dashboard', params],
     queryFn: () => dashboardApi.get(params),
   })
   const { data: trend = [] } = useQuery({
-    queryKey: ['dashboard-trend', params],
-    queryFn: () => dashboardApi.trend(12, params),
+    queryKey: ['dashboard-trend', paramsNoDates, 'week'],
+    queryFn: () => dashboardApi.trend(12, paramsNoDates, 'week'),
   })
   const { data: daily = [] } = useQuery({
     queryKey: ['dashboard-daily', params],
     queryFn: () => dashboardApi.daily({ ...params, stack_by: 'category' }),
   })
+  // x-axis dates of the daily chart, shared between the chart and the brush mapping.
+  const dailyDates = useMemo(() => {
+    if (rangeDays.length > 0) return rangeDays
+    const keys = new Set<string>()
+    for (const p of daily) keys.add(p.date)
+    return [...keys].sort()
+  }, [daily, rangeDays])
+
+  // Brush activation follows the toggle state. The daily option is memoized so
+  // unrelated re-renders don't `setOption` (notMerge would wipe the brush mode).
+  useEffect(() => {
+    const c = chartRef.current
+    if (!c) return
+    c.dispatchAction(
+      brushActive
+        ? {
+            type: 'takeGlobalCursor',
+            key: 'brush',
+            brushOption: { brushType: 'lineX', brushMode: 'single', removeOnClick: true },
+          }
+        : { type: 'takeGlobalCursor', key: 'pan' },
+    )
+  }, [brushActive])
+
+  const toggleBrush = useCallback(() => setBrushActive((a) => !a), [])
+
+  const onBrushEnd = useCallback(
+    (params: unknown) => {
+      if (!brushActive || dailyDates.length === 0) return
+      const areas = (params as { areas?: Array<{ coordRange?: number[] }> }).areas
+      const range = areas?.[0]?.coordRange
+      if (!range || range.length < 2) return
+      const a = Math.round(range[0])
+      const b = Math.round(range[1])
+      const lo = Math.max(0, Math.min(a, b))
+      const hi = Math.min(dailyDates.length - 1, Math.max(a, b))
+      // The brushActive effect dispatches the exit action (takeGlobalCursor).
+      setBrushActive(false)
+      setFilters(
+        { ...filters, dateFrom: dailyDates[lo], dateTo: dailyDates[hi] },
+        { replace: true },
+      )
+    },
+    [brushActive, dailyDates, filters, setFilters],
+  )
+
+  // dataZoom-driven filtering: zooming/pinning the slider (or wheeling) to a
+  // segment commits it as the date range; zooming all the way out clears it.
+  const zoomTimer = useRef<number | null>(null)
+  const onDataZoom = useCallback(
+    (params: unknown) => {
+      if (brushActive) return
+      if (zoomTimer.current) window.clearTimeout(zoomTimer.current)
+      zoomTimer.current = window.setTimeout(() => {
+        zoomTimer.current = null
+        if (dailyDates.length === 0) return
+        const batch = (params as { batch?: Array<{ start?: number; end?: number }> }).batch
+        const dz = batch?.[0]
+        if (!dz || dz.start == null || dz.end == null) return
+        const start = dz.start
+        const end = dz.end
+        if (start <= 0.5 && end >= 99.5) {
+          // Zoomed all the way out → clear the date range (back to unfiltered).
+          if (filters.dateFrom || filters.dateTo) {
+            setFilters({ ...filters, dateFrom: '', dateTo: '' }, { replace: true })
+          }
+          return
+        }
+        const len = dailyDates.length
+        const lo = Math.max(0, Math.round((start / 100) * (len - 1)))
+        const hi = Math.min(len - 1, Math.round((end / 100) * (len - 1)))
+        setFilters({ ...filters, dateFrom: dailyDates[lo], dateTo: dailyDates[hi] }, { replace: true })
+      }, 400)
+    },
+    [brushActive, dailyDates, filters, setFilters],
+  )
+  useEffect(() => () => {
+    if (zoomTimer.current) window.clearTimeout(zoomTimer.current)
+  }, [])
+
+  // Memoized so toggling the brush (or any unrelated state) doesn't rebuild the
+  // option — `notMerge` setOption would reset the brush/zoom state mid-use.
+  const dailyChartOption = useMemo(() => dailyOption(daily, rangeDays), [daily, rangeDays])
   const { data: topTags = [] } = useQuery({
     queryKey: ['dashboard-tags', params],
     queryFn: () => dashboardApi.tags(params),
   })
 
-  // Calendar: fixed 12-month window ending at the selected range's end month.
-  const calEndYm = (filters.dateTo || currentMonth()).slice(0, 7)
-  const calRange = useMemo(() => windowRange(calEndYm, 11), [calEndYm])
+  // Calendar: fixed 12-month window ending at the current month (never shifted by date filters).
+  const calRange = useMemo(() => windowRange(currentMonth(), 11), [])
   const { data: calDays = [] } = useQuery({
-    queryKey: ['dashboard-calendar', params, calRange],
+    queryKey: ['dashboard-calendar', paramsNoDates, calRange],
     queryFn: () =>
       dashboardApi.daily({
-        ...params,
+        ...paramsNoDates,
         stack_by: 'none',
         date_from: calRange[0],
         date_to: calRange[1],
@@ -607,7 +720,9 @@ export default function Charts() {
 
   // Previsão (merged from the old Forecast page): future obligations.
   const [horizon, setHorizon] = useState<number>(DEFAULT_HORIZON)
-  const forecastMonths = Math.max(1, Math.ceil(horizon / 30))
+  const forecastMonths = Math.max(1, horizon)
+  // Page index into `byMonth` for the Detalhamento feed (one month per page).
+  const [monthPage, setMonthPage] = useState(0)
   const { data: monthlyCost } = useQuery({
     queryKey: ['recurring-monthly-cost'],
     queryFn: recurringApi.monthlyCost,
@@ -642,6 +757,11 @@ export default function Charts() {
     }
     return [...map.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
   }, [upcoming])
+
+  // Current Detalhamento page: the selected month, clamped to the available range.
+  const page = byMonth.length === 0 ? 0 : Math.min(monthPage, byMonth.length - 1)
+  const currentMonthData = byMonth.length === 0 ? null : byMonth[page]
+  const currentTotals = currentMonthData ? monthTotals(currentMonthData[1]) : null
 
 
   const rangeLabel = useMemo(() => {
@@ -778,48 +898,6 @@ export default function Charts() {
               </div>
 
               <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
-                <h2 className="mb-2 text-sm font-medium text-zinc-400">Histórico (12 meses)</h2>
-                <EChart option={trendOption(trend)} />
-              </div>
-            </div>
-
-            <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
-              <h2 className="mb-2 text-sm font-medium text-zinc-400">
-                Gastos diários por categoria <span className="font-normal text-zinc-600">(despesas)</span>
-              </h2>
-              {daily.length === 0 ? (
-                <p className="py-8 text-center text-sm text-zinc-600">Sem dados</p>
-              ) : (
-                <EChart option={dailyOption(daily, rangeDays)} height={280} />
-              )}
-            </div>
-
-            <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
-              <h2 className="mb-2 text-sm font-medium text-zinc-400">
-                Calendário de gastos <span className="font-normal text-zinc-600">(despesas · 12 meses)</span>
-              </h2>
-              {calDays.length === 0 ? (
-                <p className="py-8 text-center text-sm text-zinc-600">Sem dados</p>
-              ) : (
-                <>
-                  <EChart option={calendarOption(calDays, calRange)} height={180} />
-                  <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-zinc-500">
-                    <span>Menos gasto</span>
-                    <div
-                      className="h-2.5 w-36 rounded-full"
-                      style={{
-                        background:
-                          'linear-gradient(to right, #18181b, #78350f, #b45309, #d97706, #f59e0b, #fbbf24)',
-                      }}
-                    />
-                    <span>Mais gasto</span>
-                  </div>
-                </>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
                 <h2 className="mb-2 text-sm font-medium text-zinc-400">
                   Top tags <span className="font-normal text-zinc-600">(despesas)</span>
                 </h2>
@@ -829,23 +907,96 @@ export default function Charts() {
                   <EChart option={tagsOption(topTags)} height={Math.min(320, 40 + topTags.length * 28)} />
                 )}
               </div>
+            </div>
 
-              {(dash?.top_merchants ?? []).length > 0 && (
-                <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
-                  <h2 className="mb-2 text-sm font-medium text-zinc-400">Maiores comerciantes</h2>
-                  <ul className="space-y-1">
-                    {dash!.top_merchants.map((m) => (
-                      <li key={m.merchant} className="flex items-center gap-3 text-sm">
-                        <span className="truncate">{m.merchant}</span>
-                        <span className="ml-auto tabular-nums">{fmtCents(m.total_cents)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+            <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-medium text-zinc-400">
+                  Gastos diários por categoria <span className="font-normal text-zinc-600">(despesas)</span>
+                </h2>
+                {daily.length > 0 && dailyDates.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={toggleBrush}
+                    className={`rounded border px-2 py-0.5 text-[11px] transition-colors ${
+                      brushActive
+                        ? 'border-amber-500/60 bg-amber-500/10 text-amber-300'
+                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                    }`}
+                    title="Arraste sobre o gráfico para selecionar um período; os filtros de data são atualizados"
+                  >
+                    {brushActive ? 'Arraste para selecionar… (clique p/ sair)' : '🔍 Selecionar período'}
+                  </button>
+                )}
+              </div>
+              {daily.length === 0 ? (
+                <p className="py-8 text-center text-sm text-zinc-600">Sem dados</p>
+              ) : (
+                <EChart
+                  option={dailyChartOption}
+                  height={280}
+                  onEvents={{ brushEnd: onBrushEnd, datazoom: onDataZoom }}
+                  chartRef={chartRef}
+                />
               )}
             </div>
 
+            {(dash?.top_merchants ?? []).length > 0 && (
+              <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
+                <h2 className="mb-2 text-sm font-medium text-zinc-400">Maiores comerciantes</h2>
+                <ul className="space-y-1">
+                  {dash!.top_merchants.map((m) => (
+                    <li key={m.merchant} className="flex items-center gap-3 text-sm">
+                      <span className="truncate">{m.merchant}</span>
+                      <span className="ml-auto tabular-nums">{fmtCents(m.total_cents)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
           </div>
+      </div>
+
+      <div className="mb-4 rounded border border-zinc-800 bg-zinc-900">
+        <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-zinc-800 px-4 py-3 text-sm font-medium">
+          <span>Visão geral · 12 meses</span>
+          <span className="text-xs font-normal text-zinc-500">
+            não afetado pelo filtro de período
+          </span>
+        </div>
+        <div className="space-y-4 border-t border-zinc-800 p-4">
+          <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
+            <h2 className="mb-2 text-sm font-medium text-zinc-400">
+              Histórico <span className="font-normal text-zinc-600">(despesas e receitas · semanais)</span>
+            </h2>
+            <EChart option={trendOption(trend, 'week')} height={340} />
+          </div>
+
+          <div className="rounded border border-zinc-800 bg-zinc-950 p-4">
+            <h2 className="mb-2 text-sm font-medium text-zinc-400">
+              Calendário de gastos <span className="font-normal text-zinc-600">(despesas · 12 meses)</span>
+            </h2>
+            {calDays.length === 0 ? (
+              <p className="py-8 text-center text-sm text-zinc-600">Sem dados</p>
+            ) : (
+              <>
+                <EChart option={calendarOption(calDays, calRange)} height={180} />
+                <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-zinc-500">
+                  <span>Menos gasto</span>
+                  <div
+                    className="h-2.5 w-36 rounded-full"
+                    style={{
+                      background:
+                        'linear-gradient(to right, #18181b, #78350f, #b45309, #d97706, #f59e0b, #fbbf24)',
+                    }}
+                  />
+                  <span>Mais gasto</span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="mb-4 rounded border border-zinc-800 bg-zinc-900">
@@ -856,14 +1007,17 @@ export default function Charts() {
               <button
                 key={h}
                 type="button"
-                onClick={() => setHorizon(h)}
+                onClick={() => {
+                  setHorizon(h)
+                  setMonthPage(0)
+                }}
                 className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                   horizon === h
                     ? 'bg-zinc-100 text-zinc-900'
                     : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
                 }`}
               >
-                {h} dias
+                {h} {h === 1 ? 'mês' : 'meses'}
               </button>
             ))}
           </div>
@@ -881,7 +1035,7 @@ export default function Charts() {
               <p className="text-[11px] text-zinc-600">{monthlyCost?.rule_count ?? 0} regras ativas</p>
             </div>
             <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-              <p className="text-xs text-zinc-500">Gastos esperados ({horizon} dias)</p>
+              <p className="text-xs text-zinc-500">Gastos esperados ({monthsLabel(horizon)})</p>
               <p className="text-lg font-semibold tabular-nums text-amber-300">
                 {fmtCents(forecastTotals.total)}
               </p>
@@ -904,20 +1058,50 @@ export default function Charts() {
       </div>
 
       <div className="rounded border border-zinc-800 bg-zinc-900">
-        <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3 text-sm font-medium">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3 text-sm font-medium">
           <span>Detalhamento</span>
-          <span className="text-xs font-normal text-zinc-500">
-            {upcoming.length} item{upcoming.length === 1 ? '' : 's'}
+          <span className="flex items-center gap-3 text-xs font-normal text-zinc-500">
+            <span>
+              {upcoming.length} item{upcoming.length === 1 ? '' : 's'}
+            </span>
+            {byMonth.length > 1 && currentMonthData && (
+              <span className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setMonthPage((p) => Math.max(0, p - 1))}
+                  disabled={page <= 0}
+                  className="rounded px-1.5 py-0.5 text-sm leading-none text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:pointer-events-none disabled:opacity-30"
+                  title="Mês anterior"
+                  aria-label="Mês anterior"
+                >
+                  ‹
+                </button>
+                <span className="min-w-[11rem] text-center capitalize">
+                  {monthTitle(currentMonthData[0])} · {page + 1}/{byMonth.length}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setMonthPage((p) => Math.min(byMonth.length - 1, p + 1))}
+                  disabled={page >= byMonth.length - 1}
+                  className="rounded px-1.5 py-0.5 text-sm leading-none text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:pointer-events-none disabled:opacity-30"
+                  title="Próximo mês"
+                  aria-label="Próximo mês"
+                >
+                  ›
+                </button>
+              </span>
+            )}
           </span>
         </div>
         <div className="divide-y divide-zinc-900">
-          {byMonth.length === 0 ? (
+          {!currentMonthData || !currentTotals ? (
             <p className="px-4 py-8 text-center text-sm text-zinc-600">
-              Nada esperado nos próximos {horizon} dias.
+              Nada esperado nos próximos {monthsLabel(horizon)}.
             </p>
           ) : (
-            byMonth.map(([ym, items]) => {
-              const t = monthTotals(items)
+            (() => {
+              const [ym, items] = currentMonthData
+              const t = currentTotals
               return (
                 <div key={ym} className="px-4 py-2">
                   <div className="flex flex-wrap items-baseline gap-2 py-1 text-sm">
@@ -957,7 +1141,7 @@ export default function Charts() {
                   ))}
                 </div>
               )
-            })
+            })()
           )}
         </div>
       </div>
